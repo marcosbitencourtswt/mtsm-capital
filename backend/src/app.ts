@@ -3,6 +3,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { secureHeaders } from "hono/secure-headers";
 import * as auth from "./auth.js";
 import * as conduct from "./conduct.js";
+import * as admin from "./admin.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
@@ -173,8 +174,12 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     return c.body(null, 204);
   });
   v1.get("/admin/users", async c => { requireAdmin(c); return c.json(await auth.listUsers(db)); });
-  v1.post("/admin/users", async c => { requireAdmin(c); return c.json(await auth.createUser(db, await body(c, userCreate)), 201); });
-  v1.patch("/admin/users/:id", async c => { requireAdmin(c); return c.json(await auth.updateUser(db, param(c, "id"), await body(c, userPatch), c.get("user").id)); });
+  v1.post("/admin/users", async c => { requireAdmin(c); return c.json(await auth.createUser(db, await body(c, userCreate), c.get("user")), 201); });
+  v1.patch("/admin/users/:id", async c => { requireAdmin(c); return c.json(await auth.updateUser(db, param(c, "id"), await body(c, userPatch), c.get("user"))); });
+  v1.get("/admin/status", async c => { requireAdmin(c); return c.json(await admin.status(db)); });
+  v1.get("/admin/sessions", async c => { requireAdmin(c); return c.json(await admin.listSessions(db, c.get("token"))); });
+  v1.delete("/admin/sessions/:id", async c => { requireAdmin(c); await admin.revokeSession(db, param(c, "id", z.string().regex(/^[0-9a-f]{64}$/)), c.get("user")); return c.body(null, 204); });
+  v1.get("/admin/audit", async c => { requireAdmin(c); return c.json(await admin.audit(db, Math.min(200, Number(c.req.query("limit") ?? 50) || 50))); });
 
   /* ---- Entidade: Byte4Tech (PJ) só para o administrador ---- */
   v1.use("/:entity/*", async (c, next) => {

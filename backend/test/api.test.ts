@@ -366,3 +366,48 @@ describe("Instalação pelo navegador", () => {
     expect((await off.request("/api/v1/auth/setup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "a", email: "x@y.test", name: "X", password: "senha-bem-forte-1" }) })).status).toBe(403);
   });
 });
+
+describe("Root e painel de administração", () => {
+  const login = async (email: string, password: string) => {
+    const r = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
+    return (r.headers.get("set-cookie") ?? "").split(";")[0]!;
+  };
+  it("root é protegido; só o root gerencia administradores; painel mostra status, sessões e auditoria", async () => {
+    await db.query("UPDATE app_user SET is_root = true WHERE email = 'admin@familia.test'");
+    const root = (await req("GET", "/api/v1/auth/me")).json;
+    expect(root.isRoot).toBe(true);
+
+    // root cria um segundo administrador
+    const adm2 = await req("POST", "/api/v1/admin/users", { email: "adm2@familia.test", name: "Adm Dois", role: "ADMIN", password: "senha-adm-dois-123" });
+    expect(adm2.status).toBe(201);
+    const c2 = await login("adm2@familia.test", "senha-adm-dois-123");
+    const as2 = (m: string, p: string, b?: unknown) => req(m, p, b, { cookie: c2 });
+
+    // admin comum não mexe no root nem cria/promove administradores
+    expect((await as2("PATCH", `/api/v1/admin/users/${root.id}`, { active: false })).status).toBe(403);
+    expect((await as2("POST", "/api/v1/admin/users", { email: "adm3@familia.test", name: "Adm3", role: "ADMIN", password: "senha-adm-tres-123" })).status).toBe(403);
+    const memb = await as2("POST", "/api/v1/admin/users", { email: "membro2@familia.test", name: "Membro Dois", password: "senha-membro-dois-1" });
+    expect(memb.status).toBe(201);
+    expect((await as2("PATCH", `/api/v1/admin/users/${memb.json.id}`, { role: "ADMIN" })).status).toBe(403);
+    // nem o próprio root se desativa
+    expect((await req("PATCH", `/api/v1/admin/users/${root.id}`, { active: false })).status).toBe(422);
+
+    // painel
+    const st = (await req("GET", "/api/v1/admin/status")).json;
+    expect(st.ok).toBe(true); expect(st.migrations.map((m: { name: string }) => m.name)).toContain("006_root.sql");
+    const sessions = (await req("GET", "/api/v1/admin/sessions")).json as { id: string; current: boolean; isRoot: boolean; email: string }[];
+    expect(sessions.some(s => s.current)).toBe(true);
+    // admin comum não derruba sessão do root; root derruba a do adm2
+    const rootSess = sessions.find(s => s.isRoot && !s.current)!;
+    if (rootSess) expect((await as2("DELETE", `/api/v1/admin/sessions/${rootSess.id}`)).status).toBe(403);
+    const s2 = sessions.find(s => s.email === "adm2@familia.test")!;
+    expect((await req("DELETE", `/api/v1/admin/sessions/${s2.id}`)).status).toBe(204);
+    expect((await as2("GET", "/api/v1/auth/me")).status).toBe(401);
+    const audit = (await req("GET", "/api/v1/admin/audit?limit=20")).json as { what: string; action: string }[];
+    expect(audit.length).toBeGreaterThan(0);
+    expect(JSON.stringify(audit)).not.toContain("scrypt$"); // nunca vaza hash de senha
+    // membro não acessa o painel
+    const m = await login("membro2@familia.test", "senha-membro-dois-1");
+    expect((await req("GET", "/api/v1/admin/status", undefined, { cookie: m })).status).toBe(403);
+  });
+});

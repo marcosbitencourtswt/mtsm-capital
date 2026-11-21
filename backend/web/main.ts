@@ -22,6 +22,7 @@ const CATEGORIES = ["ALIMENTACAO", "MORADIA", "AGUA", "LUZ", "INTERNET", "FIXO",
 let me: Me | null = null;
 const isAdmin = () => me?.role === "ADMIN";
 const isGuardian = () => isAdmin() || !!me?.isGuardian;
+const isRoot = () => !!me?.isRoot;
 const mine = (createdBy: string | null | undefined) => isAdmin() || (!!createdBy && createdBy === me?.id);
 const catOptions = (sel?: string) => CATEGORIES.map(c => `<option ${c === sel ? "selected" : ""}>${c}</option>`).join("");
 
@@ -59,10 +60,10 @@ function centsOf(f: FormData, k: string, required = true): number | null {
 }
 
 /* ===================== Roteamento ===================== */
-type Tab = "painel" | "combinados" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
+type Tab = "painel" | "admin" | "combinados" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
 let tab: Tab = (location.hash.slice(1) as Tab) || "painel";
-const renderers: Record<Tab, () => Promise<string>> = { painel, combinados: combinadosPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
-const TITLES: Record<Tab, string> = { painel: "Painel", combinados: "Combinados", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
+const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, combinados: combinadosPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
+const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", combinados: "Combinados", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
 const side = $("#side"), scrim = $("#scrim");
 const menu = (open: boolean) => { side.classList.toggle("open", open); scrim.classList.toggle("open", open); };
 $("#menu-btn").addEventListener("click", () => menu(true));
@@ -350,7 +351,7 @@ async function config() {
   <p class="muted">Nada é bloqueado. O que passou fora da regra fica aqui.</p>
   <div class="card">${warns.length ? `<ul class="pays">${warns.map(w => `<li><span>${br(w.paidOn)} · ${esc(w.counterparty)} · ${money(w.amountCents)}</span><span class="muted">${w.warnings.map(esc).join("; ")}</span></li>`).join("")}</ul>` : `<p class="muted">Nenhum aviso.</p>`}</div>
   <div class="row"><a href="/api/v1/${getEntity()}/export.csv"><button class="ghost">Exportar tudo (CSV para Excel)</button></a></div>
-  ${isAdmin() ? await usersSection() : ""}`;
+  ${isAdmin() ? `<p class="muted">Usuários, sessões e registro de alterações ficam em <button class="ghost sm" data-goto="admin">Administração</button>.</p>` : ""}`;
 }
 function recForm(r?: Recurrence) {
   return `
@@ -604,18 +605,18 @@ function editCats(current: string[]) {
 }
 
 /* ===================== Usuários (administrador) ===================== */
-interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; }
+interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; isRoot: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; }
 let usersCache: UserRow[] = [];
 async function usersSection() {
   usersCache = await root<UserRow[]>("/admin/users");
   return `<div class="row spread" style="margin-top:24px"><h2>Usuários</h2><button data-newuser>+ Novo usuário</button></div>
   <p class="muted">Cada pessoa entra com e-mail e senha. Você cria a conta com uma senha provisória; no primeiro acesso ela troca.</p>
   <div class="list">${usersCache.map(u => `<div class="item">
-    <div class="head"><span class="who">${esc(u.name)}${nick(u.nickname)}</span><span class="chip">${u.role === "ADMIN" ? "Administrador" : u.isGuardian ? "Responsável" : "Membro"}</span></div>
+    <div class="head"><span class="who">${esc(u.name)}${nick(u.nickname)}</span><span class="chip${u.isRoot ? " NO_VALUE" : ""}">${u.isRoot ? "Root" : u.role === "ADMIN" ? "Administrador" : u.isGuardian ? "Responsável" : "Membro"}</span></div>
     <div class="meta"><span class="muted">${esc(u.email)}</span>${u.active ? "" : `<span class="chip OVERDUE">desativado</span>`}
       ${u.mustChangePassword ? `<span class="chip NO_VALUE">senha provisória</span>` : ""}
       <span class="muted">último acesso: ${u.lastLoginAt ? br(u.lastLoginAt) : "nunca"}</span></div>
-    ${u.id !== me?.id ? `<div class="actions"><button class="ghost sm" data-edituser="${u.id}">Editar</button><button class="ghost sm" data-resetuser="${u.id}">Nova senha</button>
+    ${u.id !== me?.id && !u.isRoot && (isRoot() || u.role !== "ADMIN") ? `<div class="actions"><button class="ghost sm" data-edituser="${u.id}">Editar</button><button class="ghost sm" data-resetuser="${u.id}">Nova senha</button>
       <button class="ghost sm" data-toggleuser="${u.id}" data-active="${u.active}">${u.active ? "Desativar" : "Reativar"}</button></div>` : ""}
   </div>`).join("")}</div>`;
 }
@@ -623,7 +624,7 @@ function userForm(u?: UserRow) {
   return `<div class="full"><label>Nome</label><input name="name" required value="${esc(u?.name)}"></div>
     <div class="full"><label>E-mail</label><input name="email" type="email" required value="${esc(u?.email)}"></div>
     <div><label>Apelido</label><input name="nick" placeholder="ex.: Gastadora" value="${esc(u?.nickname)}"></div>
-    <div><label>Perfil</label><select name="role"><option value="MEMBER" ${u?.role === "MEMBER" ? "selected" : ""}>Membro</option><option value="ADMIN" ${u?.role === "ADMIN" ? "selected" : ""}>Administrador</option></select></div>
+    <div><label>Perfil</label><select name="role"><option value="MEMBER" ${u?.role === "MEMBER" ? "selected" : ""}>Membro</option>${isRoot() ? `<option value="ADMIN" ${u?.role === "ADMIN" ? "selected" : ""}>Administrador</option>` : ""}</select></div>
     <label class="inline full"><input type="checkbox" name="guard" ${u?.isGuardian ? "checked" : ""}> Responsável (registra ocorrências e corrige hábitos)</label>
     <div class="full"><label>É quem em Pessoas da casa</label><select name="person"><option value="">—</option>${people.map(p => `<option value="${p.id}" ${u?.personId === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
     ${u ? "" : `<div class="full"><label>Senha provisória (mín. 10 caracteres)</label><input name="pw" type="text" minlength="10" required autocomplete="off"></div>`}`;
@@ -652,6 +653,32 @@ function resetUser(id: string) {
   });
 }
 
+/* ===================== Administração ===================== */
+interface Status { ok: boolean; dbLatencyMs: number; database: { version: string; size: string }; counts: Record<string, number>;
+  migrations: { name: string; appliedAt: string }[]; runtime: { node: string; vercel: boolean; region: string | null; commit: string | null }; }
+interface Sess { id: string; name: string; email: string; isRoot: boolean; device: string; lastSeenAt: string; createdAt: string; current: boolean; }
+interface Audit { id: number; at: string; what: string; action: string; label: string; changed: string[]; }
+const dt = (iso: string) => new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+async function adminPage() {
+  if (!isAdmin()) return `<div class="empty">Área só para administradores.</div>`;
+  const [st, sessions, log] = await Promise.all([root<Status>("/admin/status"), root<Sess[]>("/admin/sessions"), root<Audit[]>("/admin/audit?limit=40")]);
+  const c = st.counts;
+  const kpi = (l: string, v: string | number) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div></div>`;
+  return `<div class="alert ${st.ok ? "ok" : "danger"}"><b>${st.ok ? "Sistema funcionando" : "Problema no sistema"}</b> · banco PostgreSQL ${esc(st.database.version)} · ${esc(st.database.size)} · resposta ${st.dbLatencyMs} ms
+      ${st.runtime.vercel ? `· Vercel ${esc(st.runtime.region ?? "")}${st.runtime.commit ? ` · versão ${esc(st.runtime.commit)}` : ""}` : "· servidor local"}</div>
+    <div class="grid">${kpi("Usuários ativos", c.users ?? 0)}${kpi("Pessoas da casa", c.people ?? 0)}${kpi("Sessões abertas", c.sessions ?? 0)}${kpi("Lançamentos 30 dias", c.settlements30d ?? 0)}</div>
+    ${await usersSection()}
+    <h2 style="margin-top:24px">Sessões abertas</h2>
+    <p class="muted">Aparelhos com login ativo. Encerre se um celular for perdido ou emprestado.</p>
+    <div class="card scroll"><table><tr><th>Quem</th><th>Aparelho</th><th>Último uso</th><th>Desde</th><th></th></tr>
+      ${sessions.map(x => `<tr><td>${esc(x.name)}${x.isRoot ? ` <span class="chip NO_VALUE">Root</span>` : ""}</td><td>${esc(x.device)}</td><td>${dt(x.lastSeenAt)}</td><td>${dt(x.createdAt)}</td>
+        <td>${x.current ? `<span class="chip SETTLED">este aparelho</span>` : !x.isRoot || isRoot() ? `<button class="danger sm" data-endsess="${x.id}">Encerrar</button>` : ""}</td></tr>`).join("")}</table></div>
+    <h2 style="margin-top:24px">Registro de alterações</h2>
+    <p class="muted">As últimas 40 mudanças no sistema. O histórico completo fica guardado no banco.</p>
+    <div class="card"><ul class="pays">${log.map(l => `<li><span><b>${esc(l.what)}</b> ${esc(l.action)}${l.label ? `: ${esc(l.label)}` : ""}${l.changed.length ? ` <span class="muted">(${l.changed.slice(0, 4).map(esc).join(", ")})</span>` : ""}</span><span class="muted">${dt(l.at)}</span></li>`).join("")}</ul></div>
+    <details class="card"><summary>Versão do banco (${st.migrations.length} atualizações aplicadas)</summary><ul class="pays">${st.migrations.map(m => `<li><span>${esc(m.name)}</span><span class="muted">${dt(m.appliedAt)}</span></li>`).join("")}</ul></details>`;
+}
+
 /* ===================== Sessão: login, senha, sair ===================== */
 function changePassword(forced: boolean) {
   openDialog(forced ? "Crie sua senha" : "Trocar senha", `${forced ? `<p class="muted full">Primeiro acesso: troque a senha provisória por uma só sua.</p>` : ""}
@@ -666,9 +693,11 @@ function changePassword(forced: boolean) {
   if (forced) dlgForm.querySelector<HTMLElement>("[data-close]")!.hidden = true;
 }
 function renderMe() {
-  $("#me").innerHTML = me ? `<div><b>${esc(me.name)}</b>${me.nickname ? ` <small>· ${esc(me.nickname)}</small>` : ""}<br><small>${me.role === "ADMIN" ? "Administrador" : me.isGuardian ? "Responsável" : "Membro"}</small></div>
+  $("#me").innerHTML = me ? `<div><b>${esc(me.name)}</b>${me.nickname ? ` <small>· ${esc(me.nickname)}</small>` : ""}<br><small>${me.isRoot ? "Root" : me.role === "ADMIN" ? "Administrador" : me.isGuardian ? "Responsável" : "Membro"}</small></div>
     <div class="row"><button data-act="password">Trocar senha</button><button data-act="logout">Sair</button></div>` : "";
   entSel.hidden = !isAdmin();
+  $("#tab-admin").hidden = !isAdmin();
+  if (!isAdmin() && tab === "admin") tab = "painel";
   if (!isAdmin() && getEntity() !== "personal") { setEntity("personal"); entSel.value = "personal"; }
 }
 function showLogin() {
@@ -750,6 +779,7 @@ view.addEventListener("click", async e => {
     else if (d.mand) { await api(`/titles/${d.mand}`, { method: "PATCH", body: { mandatory: d.val === "true" } }); toast("Classificação revisada."); await render(); }
     else if (d.editcats !== undefined) editCats((await api<string[]>("/settings/mandatory-categories")));
     else if (d.newuser !== undefined) newUser();
+    else if (d.endsess) { if (confirm("Encerrar esta sessão? A pessoa terá que entrar de novo nesse aparelho.")) { await root(`/admin/sessions/${d.endsess}`, { method: "DELETE" }); toast("Sessão encerrada."); await render(); } }
     else if (d.edituser) editUser(d.edituser);
     else if (d.resetuser) resetUser(d.resetuser);
     else if (d.toggleuser) { await root(`/admin/users/${d.toggleuser}`, { method: "PATCH", body: { active: d.active !== "true" } }); toast(d.active === "true" ? "Usuário desativado." : "Usuário reativado."); await render(); }

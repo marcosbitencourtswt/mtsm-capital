@@ -35,8 +35,8 @@ export function validatePassword(pw: string) {
   if (/^(.)\1+$/.test(pw) || /^(\d+|(senha|password|mudar|trocar)\d*)$/i.test(pw)) throw new AppError(422, "WEAK_PASSWORD", "Senha fácil demais. Use uma frase ou misture palavras e números.");
 }
 
-export interface SessionUser { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; }
-const USER_COLS = `u.id, u.email, u.name, u.nickname, u.role, u.person_id AS "personId", u.must_change_password AS "mustChangePassword", u.is_guardian AS "isGuardian"`;
+export interface SessionUser { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; }
+const USER_COLS = `u.id, u.email, u.name, u.nickname, u.role, u.person_id AS "personId", u.must_change_password AS "mustChangePassword", u.is_guardian AS "isGuardian", u.is_root AS "isRoot"`;
 
 export async function login(db: Db, emailRaw: string, pw: string, userAgent?: string) {
   const email = emailRaw.trim().toLowerCase();
@@ -81,12 +81,15 @@ export async function changePassword(db: Db, userId: string, current: string, ne
 }
 
 /* ---------- Administração de usuários (só ADMIN) ---------- */
-const PUBLIC_COLS = `id, email, name, nickname, role, person_id AS "personId", is_guardian AS "isGuardian", active, must_change_password AS "mustChangePassword", last_login_at AS "lastLoginAt", created_at AS "createdAt"`;
+const PUBLIC_COLS = `id, email, name, nickname, role, person_id AS "personId", is_guardian AS "isGuardian", is_root AS "isRoot", active, must_change_password AS "mustChangePassword", last_login_at AS "lastLoginAt", created_at AS "createdAt"`;
 export async function listUsers(db: Db) {
-  return (await db.query(`SELECT ${PUBLIC_COLS} FROM app_user ORDER BY role, name`)).rows;
+  return (await db.query(`SELECT ${PUBLIC_COLS} FROM app_user ORDER BY is_root DESC, role, name`)).rows;
 }
 export interface UserInput { email: string; name: string; nickname?: string | null; role?: "ADMIN" | "MEMBER"; personId?: string | null; isGuardian?: boolean; password: string; }
-export async function createUser(db: Db, i: UserInput) {
+export type Actor = { id: string; isRoot: boolean };
+/** actor ausente = script de linha de comando (quem tem acesso ao banco já é dono do sistema). */
+export async function createUser(db: Db, i: UserInput, actor?: Actor) {
+  if (actor && i.role === "ADMIN" && !actor.isRoot) throw new AppError(403, "ROOT_ONLY", "Só o root cria administradores.");
   validatePassword(i.password);
   if (i.personId) await assertPersonPersonal(db, i.personId);
   try {
@@ -99,8 +102,15 @@ export async function createUser(db: Db, i: UserInput) {
     throw e;
   }
 }
-export async function updateUser(db: Db, id: string, p: Partial<Omit<UserInput, "password">> & { active?: boolean; password?: string }, actorId: string) {
-  if (id === actorId && (p.active === false || p.role === "MEMBER")) throw new AppError(422, "SELF_LOCKOUT", "Você não pode remover o próprio acesso de administrador.");
+export async function updateUser(db: Db, id: string, p: Partial<Omit<UserInput, "password">> & { active?: boolean; password?: string }, actor: Actor) {
+  const t = (await db.query("SELECT role, is_root FROM app_user WHERE id = $1", [id])).rows[0];
+  if (!t) throw new AppError(404, "USER_NOT_FOUND", "Usuário não encontrado.");
+  if (t.is_root) {
+    if (actor.id !== id) throw new AppError(403, "ROOT_PROTECTED", "O root só pode ser alterado por ele mesmo.");
+    if (p.active === false || p.role === "MEMBER" || p.isGuardian === false) throw new AppError(422, "ROOT_PROTECTED", "O root não pode ser desativado nem perder o acesso de administrador.");
+  }
+  if ((t.role === "ADMIN" || p.role === "ADMIN") && !actor.isRoot) throw new AppError(403, "ROOT_ONLY", "Só o root gerencia administradores.");
+  if (id === actor.id && (p.active === false || p.role === "MEMBER")) throw new AppError(422, "SELF_LOCKOUT", "Você não pode remover o próprio acesso de administrador.");
   if (p.personId) await assertPersonPersonal(db, p.personId);
   const sets: string[] = []; const vals: unknown[] = [];
   const add = (col: string, v: unknown) => { vals.push(v); sets.push(`${col} = $${vals.length + 1}`); };
@@ -141,8 +151,8 @@ export async function setupFirstAdmin(db: Db, expectedToken: string | undefined,
   if (a.length !== b.length || !timingSafeEqual(a, b)) throw new AppError(403, "SETUP_TOKEN", "Código de instalação incorreto.");
   validatePassword(i.password);
   // Trava contra duas instalações simultâneas: só insere se a tabela ainda estiver vazia.
-  const r = await db.query(`INSERT INTO app_user (email, name, nickname, role, is_guardian, must_change_password, password_hash)
-    SELECT $1, $2, 'Gastador', 'ADMIN', true, false, $3 WHERE NOT EXISTS (SELECT 1 FROM app_user) RETURNING id`,
+  const r = await db.query(`INSERT INTO app_user (email, name, nickname, role, is_guardian, is_root, must_change_password, password_hash)
+    SELECT $1, $2, 'Gastador', 'ADMIN', true, true, false, $3 WHERE NOT EXISTS (SELECT 1 FROM app_user) RETURNING id`,
     [i.email.trim().toLowerCase(), i.name.trim(), await hashPassword(i.password)]);
   if (!r.rowCount) throw new AppError(409, "ALREADY_SETUP", "O sistema já foi instalado. Entre com seu e-mail e senha.");
   return login(db, i.email, i.password, userAgent);
