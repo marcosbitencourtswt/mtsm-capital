@@ -1,0 +1,13 @@
+# Só o PostgreSQL. A API roda com `npm run dev` (mais simples de depurar no localhost).
+services:
+  db:
+    image: postgres:16.6-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-troque-esta-senha}
+      POSTGRES_DB: nofinance
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    restart: unless-stopped
+volumes:
+  pgdata:

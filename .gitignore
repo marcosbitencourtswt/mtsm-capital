@@ -1,0 +1,10 @@
+.pgdata/
+node_modules/
+.env
+.env.*
+!.env.example
+backend/backups/*.dump
+backend/.vercel/
+backend/public/app.js
+backend/public/app.js.map
+docs/
