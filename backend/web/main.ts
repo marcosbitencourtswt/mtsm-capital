@@ -676,7 +676,11 @@ function showLogin() {
   root<{ needed: boolean }>("/auth/setup").then(r => {
     $("#setup-form").hidden = !r.needed; $("#login-form").hidden = r.needed;
     $<HTMLInputElement>(r.needed ? "#st-token" : "#lg-email").focus();
-  }).catch(() => $<HTMLInputElement>("#lg-email").focus());
+  }).catch(e => {
+    // Banco desconectado ou servidor fora do ar: diz o motivo em vez de mostrar um login que não vai funcionar.
+    $("#login-err").textContent = e instanceof ApiError ? e.message : "Servidor indisponível. Tente de novo em instantes.";
+    $<HTMLInputElement>("#lg-email").focus();
+  });
 }
 $("#setup-form").addEventListener("submit", async e => {
   e.preventDefault();
