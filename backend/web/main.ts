@@ -9,6 +9,7 @@ import { titles, newTitle, editTitle, payTitle, showPays, editPay } from "./page
 import { pessoas, newPerson, editPerson } from "./pages/pessoas.js";
 import { extrato } from "./pages/extrato.js";
 import { futuro, runSim } from "./pages/futuro.js";
+import { submitExpense, runJuros } from "./pages/lancar.js";
 import { config, newRec, editRec } from "./pages/config.js";
 import { $, st, loadPeople, view, openDialog, str, dlg, toast, dlgForm, isAdmin, fail, centsOf } from "./core.js";
 import { resetCharts, paintCharts, wireTooltips } from "./charts.js";
@@ -49,7 +50,7 @@ $("#tabs").addEventListener("click", e => {
 });
 export const entSel = $<HTMLSelectElement>("#entity");
 entSel.value = getEntity();
-entSel.addEventListener("change", () => { setEntity(entSel.value); st.personFilter = ""; render(); });
+entSel.addEventListener("change", () => { setEntity(entSel.value); st.personFilter = ""; st.personFilterSet = false; render(); });
 
 /* ===================== Verificação em duas etapas ===================== */
 export async function mfaSetup() {
@@ -176,13 +177,14 @@ view.addEventListener("click", async e => {
   if (!b) return;
   const d = b.dataset;
   try {
-    if (d.new) newTitle(d.new as Kind);
+    if (d.new) await newTitle(d.new as Kind);
     else if (d.edit) await editTitle(d.edit);
     else if (d.pay) await payTitle(d.pay);
     else if (d.pays) await showPays(d.pays);
     else if (d.pedit) editPay(d.pedit, Number(d.amt), d.dt!);
     else if (d.pdel) { if (confirm("Excluir este pagamento? O saldo volta a ficar em aberto.")) { await api(`/settlements/${d.pdel}`, { method: "DELETE" }); toast("Pagamento excluído."); await render(); } }
     else if (d.del) { if (confirm("Excluir esta conta? Ela some das listas (fica no histórico).")) { await api(`/titles/${d.del}`, { method: "DELETE" }); toast("Conta excluída."); await render(); } }
+    else if ("pf" in d) { st.personFilter = d.pf ?? ""; st.personFilterSet = true; await render(); }
     else if (d.filter) { st.statusFilter = d.filter as typeof st.statusFilter; await render(); }
     else if (d.proj) { st.projMonths = Number(d.proj); await render(); }
     else if (d.extyear) { if (d.extyear === "last6") { st.extTo = today().slice(0, 7); st.extFrom = addMonths(st.extTo, -5).slice(0, 7); } else { st.extFrom = `${d.extyear}-01`; st.extTo = `${d.extyear}-12`; } await render(); }
@@ -248,7 +250,7 @@ view.addEventListener("click", async e => {
     else if (d.toggleuser) { await root(`/admin/users/${d.toggleuser}`, { method: "PATCH", body: { active: d.active !== "true" } }); toast(d.active === "true" ? "Usuário desativado." : "Usuário reativado."); await render(); }
     else if (d.editperson) editPerson(d.editperson);
     else if (d.toggleperson) { await api(`/people/${d.toggleperson}`, { method: "PATCH", body: { active: d.active !== "true" } }); await render(); }
-    else if (d.seeperson) { st.personFilter = d.seeperson; st.statusFilter = "all"; st.tab = "pagar"; history.replaceState(null, "", "#pagar"); await render(); }
+    else if (d.seeperson) { st.personFilter = d.seeperson; st.personFilterSet = true; st.statusFilter = "all"; st.tab = "pagar"; history.replaceState(null, "", "#pagar"); await render(); }
     else if (d.editrec) await editRec(d.editrec);
     else if (d.togglerec) { await api(`/recurrences/${d.togglerec}`, { method: "PATCH", body: { active: d.active !== "true" } }); await render(); }
   } catch (err) { fail(err); }
@@ -271,12 +273,8 @@ view.addEventListener("submit", async e => {
   e.preventDefault();
   try {
     if (form.id === "quick") {
-      const f = new FormData(form);
-      const r = await api<{ guard: { allowed: boolean; message: string } }>("/expenses/quick", { method: "POST", body: {
-        amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null, ...srcOf(f) } });
-      const viaCard = str(f, "src").startsWith("card:");
-      toast(r.guard.allowed ? (viaCard ? "Gasto registrado na fatura do cartão." : "Gasto registrado.") : `Registrado com aviso: ${r.guard.message}`, !r.guard.allowed);
-      await render();
+      const r = await submitExpense(new FormData(form));
+      toast(r.msg, r.warn); await render();
     } else if (form.id === "quick-tr") {
       const f = new FormData(form);
       if (str(f, "from") === str(f, "to")) { toast("Escolha contas diferentes em De e Para.", true); return; }
@@ -318,6 +316,7 @@ view.addEventListener("submit", async e => {
       if (st.extFrom > st.extTo) [st.extFrom, st.extTo] = [st.extTo, st.extFrom];
       await render();
     } else if (form.id === "sim") await runSim(form);
+    else if (form.id === "juros") runJuros(form);
     else if (form.id === "pmonth") { st.peopleMonth = str(new FormData(form), "m") || st.peopleMonth; await render(); }
   } catch (err) { fail(err); }
 });
@@ -345,7 +344,6 @@ applyLook();
 
 view.addEventListener("change", e => {
   const el = e.target as HTMLSelectElement;
-  if (el.id === "pfilter") { st.personFilter = el.value; render(); }
 });
 
 root<Me>("/auth/me").then(enter).catch(showLogin);

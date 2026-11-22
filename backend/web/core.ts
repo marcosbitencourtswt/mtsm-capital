@@ -14,6 +14,7 @@ export const st = {
   tab: (location.hash.slice(1) as Tab) || "painel" as Tab,
   statusFilter: "open" as "open" | "settled" | "all",
   personFilter: "",
+  personFilterSet: false, // aba de pessoa já escolhida nesta sessão? (padrão: "Minhas + casa")
   extFrom: addMonths(today().slice(0, 7), -5),
   extTo: today().slice(0, 7),
   projMonths: 12,
@@ -64,9 +65,9 @@ export const catOptions = (sel?: string) => [...CATEGORIES, ...(sel && !CATEGORI
   .map(c => `<option value="${esc(c)}" ${c === sel ? "selected" : ""}>${esc(catLabel(c))}</option>`).join("");
 export const loadPeople = async () => { st.people = await api<Person[]>("/people"); return st.people; };
 export const personOptions = (sel?: string | null, includeInactive = false) =>
-  `<option value="">Casa / geral</option>` + st.people.filter(p => p.active || includeInactive || p.id === sel)
+  `<option value="">Da casa (de todos)</option>` + st.people.filter(p => p.active || includeInactive || p.id === sel)
     .map(p => `<option value="${p.id}" ${p.id === sel ? "selected" : ""}>${esc(p.name)}${p.active ? "" : " (inativa)"}</option>`).join("");
-export const personSelect = (sel?: string | null) => `<div><label>Pessoa</label><select name="person">${personOptions(sel)}</select></div>`;
+export const personSelect = (sel?: string | null) => `<div><label>De quem é</label><select name="person">${personOptions(sel)}</select></div>`;
 
 /** Abre um formulário em diálogo. onSubmit retorna false para manter aberto. */
 export function openDialog(title: string, body: string, submitLabel: string, onSubmit: (f: FormData) => Promise<boolean | void>) {

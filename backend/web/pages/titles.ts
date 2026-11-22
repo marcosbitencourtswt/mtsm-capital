@@ -1,12 +1,15 @@
 /** Gerado ao separar a tela em módulos: pages/titles. */
-import { type Kind, api, type Title, ApiError, type Settlement } from "../api.js";
+import { type Kind, api, type Title, ApiError, type Settlement, getEntity } from "../api.js";
 import { st, STATUS, NATURE, catLabel, mine, catOptions, personSelect, dlgForm, str, openDialog, centsOf, toast, $ } from "../core.js";
 import { esc, money, br, pct, moneyInput, today, parseMoney } from "../fmt.js";
 import { type Acc, isCashAcc } from "./bancos.js";
 import { dt } from "./admin.js";
+import { expenseFields, submitExpense } from "./lancar.js";
  // "" = todas, "none" = casa/geral, ou id
 /* ===================== Contas a pagar / receber ===================== */
 export async function titles(kind: Kind) {
+  const myP = st.me?.personId ?? null;
+  if (!st.personFilterSet && myP && getEntity() === "personal") { st.personFilter = `${myP}+none`; st.personFilterSet = true; }
   const list = await api<Title[]>(`/titles?kind=${kind}&status=${st.statusFilter}${st.personFilter ? `&person=${st.personFilter}` : ""}`);
   const label = kind === "PAYABLE" ? "Contas a pagar" : "Contas a receber";
   const total = list.reduce((s, t) => s + Math.max(0, t.openCents), 0);
@@ -14,11 +17,12 @@ export async function titles(kind: Kind) {
   return `
   <div class="row spread"><h2>${label}</h2><button data-new="${kind}">+ Nova</button></div>
   <div class="row" style="margin-bottom:12px">${f("open", "Em aberto")}${f("settled", kind === "PAYABLE" ? "Pagas" : "Recebidas")}${f("all", "Todas")}
-    <select id="pfilter" style="width:auto"><option value="">Todas as pessoas</option><option value="none" ${st.personFilter === "none" ? "selected" : ""}>Casa / geral</option>
-      ${st.people.map(p => `<option value="${p.id}" ${st.personFilter === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
     <span class="muted" style="margin-left:auto">Em aberto: <b>${money(total)}</b></span></div>
+  ${getEntity() === "personal" ? `<div class="row tabs-p" style="margin-bottom:12px">${pTab(myP ? `${myP}+none` : null, "Minhas + casa")}
+    ${st.people.filter(p => p.active && p.id !== myP).map(p => pTab(p.id, esc(p.name))).join("")}${pTab("none", "Só da casa")}${pTab("", "Todas")}</div>` : ""}
   <div class="list">${list.length ? list.map(titleItem).join("") : `<div class="empty">Nenhuma conta aqui. Toque em "+ Nova".</div>`}</div>`;
 }
+const pTab = (v: string | null, l: string) => (v == null ? "" : `<button class="${st.personFilter === v ? "" : "ghost"} sm" data-pf="${v}">${l}</button>`);
 export function titleItem(t: Title) {
   const payLabel = t.kind === "PAYABLE" ? "Pagar" : "Receber";
   return `<div class="item">
@@ -78,8 +82,15 @@ export function interestFrom(f: FormData) {
   return model === "NONE" || rateBp === 0 ? { interestModel: "NONE", rateBp: 0 } : { interestModel: model, rateBp };
 }
 
-export function newTitle(kind: Kind) {
-  openDialog(kind === "PAYABLE" ? "Nova conta a pagar" : "Nova conta a receber", titleForm(kind), "Salvar", async f => {
+export async function newTitle(kind: Kind) {
+  if (kind === "PAYABLE") {
+    const accs = await api<Acc[]>("/accounts").catch(() => [] as Acc[]);
+    openDialog("Novo gasto ou conta a pagar", `${expenseFields(accs, { later: true })}
+      <p class="muted full">Já pagou? Escolha com qual conta ou cartão: vira gasto e sai do saldo. Dívida, empréstimo ou cartão novo? Cadastre em <b>Bancos e dívidas</b>.</p>`,
+      "Salvar", async f => { const r = await submitExpense(f); toast(r.msg, r.warn); });
+    return;
+  }
+  openDialog("Nova conta a receber", titleForm(kind), "Salvar", async f => {
     const nat = str(f, "nat"), int = interestFrom(f);
     const body: Record<string, unknown> = {
       kind, nature: nat, counterparty: str(f, "who"), category: str(f, "cat"),

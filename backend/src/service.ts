@@ -56,6 +56,7 @@ export async function listTitles(db: Db, e: Entity, f: TitleFilter, asOf = today
   if (f.from) { params.push(f.from); cond.push(`AND t.due_date >= $${params.length + 1}`); }
   if (f.to) { params.push(f.to); cond.push(`AND t.due_date <= $${params.length + 1}`); }
   if (f.personId === "none") cond.push("AND t.person_id IS NULL");
+  else if (f.personId?.endsWith("+none")) { params.push(f.personId.slice(0, -5)); cond.push(`AND (t.person_id = $${params.length + 1} OR t.person_id IS NULL)`); }
   else if (f.personId) { params.push(f.personId); cond.push(`AND t.person_id = $${params.length + 1}`); }
   let list = await loadViews(db, e, asOf, cond.join(" "), params);
   if (f.status === "open") list = list.filter(t => t.status !== "SETTLED");

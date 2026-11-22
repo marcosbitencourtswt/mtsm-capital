@@ -51,6 +51,24 @@ try {
   const bal = await adm.evaluate(async (id: string) => (await (await fetch("/api/v1/personal/accounts")).json()).find((a: { id: string }) => a.id === id).balanceCents, acc);
   check(bal === 100000 - 1234, "Já gastei desconta da conta escolhida");
 
+  // mesmo formulário: "ainda não paguei" mostra o vencimento e cria conta a pagar (não mexe no saldo)
+  await adm.waitForSelector("#quick");
+  check(await adm.isHidden("#quick [data-due]"), "vencimento escondido quando já pagou");
+  await adm.selectOption("#quick [name=src]", "later");
+  check(await adm.isVisible("#quick [data-due]"), "vencimento aparece quando ainda não pagou");
+  await adm.fill("#quick [name=v]", "50,00"); await adm.fill("#quick [name=d]", "Conta Futura E2E"); await adm.fill("#quick [name=due]", "2030-01-10");
+  await adm.click("#quick button"); await adm.waitForTimeout(600);
+  const fut = await adm.evaluate(async () => (await (await fetch("/api/v1/personal/titles?kind=PAYABLE&status=open")).json()).find((t: { counterparty: string }) => t.counterparty === "Conta Futura E2E"));
+  const balFut = await adm.evaluate(async (id: string) => (await (await fetch("/api/v1/personal/accounts")).json()).find((a: { id: string }) => a.id === id).balanceCents, acc);
+  check(fut?.dueDate === "2030-01-10" && fut?.openCents === 5000 && balFut === bal, "ainda não paguei vira conta a pagar com vencimento");
+
+  // calculadora de juros
+  await adm.goto(`${U}/#futuro`); await adm.reload(); await adm.waitForSelector("#juros");
+  await adm.fill("#juros [name=pv]", "1.000,00"); await adm.fill("#juros [name=n]", "12"); await adm.fill("#juros [name=pmt]", "100,00"); await adm.fill("#juros [name=left]", "6");
+  await adm.click("#juros button");
+  const jt = await adm.textContent("#juros-out");
+  check(!!jt && jt.includes("2,92%") && /Economia de cerca de/.test(jt), "calculadora de juros acha a taxa e a economia");
+
   // todas as telas abrem sem erro
   for (const t of ["painel", "pedidos", "combinados", "bancos", "pagar", "receber", "extrato", "indicadores", "ranking", "pessoas", "futuro", "admin", "config"]) {
     await adm.goto(`${U}/#${t}`); await adm.reload();

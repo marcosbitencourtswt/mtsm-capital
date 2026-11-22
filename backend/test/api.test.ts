@@ -165,6 +165,13 @@ describe("Pessoas da casa", () => {
 
     const only = (await req("GET", `${P}/titles?person=${ana.id}`)).json;
     expect(only.map((x: { counterparty: string }) => x.counterparty).sort()).toEqual(["Escola", "Farmácia"]);
+    // aba "Minhas + casa": as da pessoa e as sem dono, nunca as de outra pessoa
+    const outra = (await req("POST", `${P}/people`, { name: "Bia" })).json;
+    await req("POST", `${P}/titles`, { kind: "PAYABLE", nature: "EXPENSE", counterparty: "Curso da Bia", category: "EDUCACAO", amountCents: 1000, dueDate: "2026-11-30", personId: outra.id });
+    await req("POST", `${P}/titles`, { kind: "PAYABLE", nature: "EXPENSE", counterparty: "Luz da casa", category: "LUZ", amountCents: 1000, dueDate: "2026-11-30" });
+    const mineAndHouse = (await req("GET", `${P}/titles?person=${ana.id}%2Bnone&status=all`)).json.map((x: { counterparty: string }) => x.counterparty);
+    expect(mineAndHouse).toContain("Escola"); expect(mineAndHouse).toContain("Luz da casa"); expect(mineAndHouse).not.toContain("Curso da Bia");
+    expect((await req("GET", `${P}/titles?person=xyz%2Bnone`)).status).toBe(400);
 
     const sum = (await req("GET", `${P}/people/summary?from=2026-11&to=2026-11`)).json;
     const a = sum.people.find((x: { name: string }) => x.name === "Ana");

@@ -338,7 +338,9 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
 
   const personFilter = (v: string | undefined) => {
     if (!v || v === "none") return v;
-    if (!uuid.safeParse(v).success) throw new AppError(400, "INVALID_PARAM", "person inválido.");
+    // "<id>+none" = da pessoa OU da casa (aba "Minhas + casa")
+    const id = v.endsWith("+none") ? v.slice(0, -5) : v;
+    if (!uuid.safeParse(id).success) throw new AppError(400, "INVALID_PARAM", "person inválido.");
     return v;
   };
   const asOf = (c: Context) => { const d = c.req.query("asOf"); if (d && !isoDate.safeParse(d).success) throw new AppError(400, "INVALID_PARAM", "asOf inválido."); return d ?? todaySP(); };

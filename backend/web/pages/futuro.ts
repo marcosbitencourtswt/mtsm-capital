@@ -2,6 +2,7 @@
 import { api, type Recurrence, type Kind } from "../api.js";
 import { st, centsOf, $ } from "../core.js";
 import { moneyInput, monthLabel, money, addMonths, today, esc } from "../fmt.js";
+import { jurosCard } from "./lancar.js";
 
 /* ===================== Futuro: projeção + simulador ===================== */
 export async function futuro() {
@@ -29,7 +30,8 @@ export async function futuro() {
       <div><label class="inline"><input type="checkbox" name="roll" checked> Juros por ciclo se atrasar</label>
            <label class="inline"><input type="checkbox" name="cards" checked> Incluir cartões</label></div>
       <div><button>Simular</button></div>
-    </form><div id="sim-out">${st.simCache}</div></div>`;
+    </form><div id="sim-out">${st.simCache}</div></div>
+  ${jurosCard()}`;
 }
 export interface SimRes { assumptions: string[]; monthlySurplusCents: number; totalDebtCents: number; results: { strategy: string; feasible: boolean; months: number | null; extraInterestCents: number; payoffOrder: string[] }[]; }
 export async function runSim(form: HTMLFormElement) {

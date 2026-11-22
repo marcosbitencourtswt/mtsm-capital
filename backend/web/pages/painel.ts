@@ -3,12 +3,13 @@ import { type Title, getEntity, api } from "../api.js";
 import { type Ranking, spendKpis } from "./ranking.js";
 import { type Board, type Pending, pendingCard, todayCard } from "./combinados.js";
 import { type Acc, type DebtSummary, isCashAcc, debtBoard } from "./bancos.js";
-import { st, isGuardian, isRoot, catOptions, personSelect } from "../core.js";
+import { st, isGuardian, isRoot, personSelect } from "../core.js";
 import { type Budget, budgetCard } from "./orcamento.js";
 import { type PReq } from "./pedidos.js";
 import { esc, money, today, br, pct } from "../fmt.js";
 import { pjCards } from "./pj.js";
 import { receiptCard } from "./cupons.js";
+import { expenseFields } from "./lancar.js";
 
 /* ===================== Painel ===================== */
 export interface Dashboard {
@@ -29,7 +30,6 @@ export async function painel() {
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
   const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
   const cardOpts = live.filter(a => a.type === "CARD").map(a => `<option value="card:${a.id}">Cartão ${accLabel(a)}</option>`).join("");
-  const paidWith = `<div><label>Pago com</label><select name="src"><option value="">Não sei / não informar</option>${cashOpts}${cardOpts}</select></div>`;
   const cameIn = `<div><label>Entrou em</label><select name="src"><option value="">Não informar</option>${cashOpts}</select></div>`;
   const trOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="${a.id}">${accLabel(a)}</option>`).join("");
   const kpi = (l: string, v: number, cls = "", hero = false) => `<div class="card kpi${hero ? " hero" : ""}"><div class="l">${l}</div><div class="v ${cls}">${money(v)}</div></div>`;
@@ -51,14 +51,9 @@ export async function painel() {
   ${d.overdue.length ? `<div class="alert danger"><b>${d.overdue.length} conta(s) vencida(s):</b> ${d.overdue.map(t => `${esc(t.counterparty)} ${money(t.openCents)}`).join(" · ")}</div>` : ""}
   ${d.missingValue.length ? `<div class="alert"><b>Sem valor:</b> ${d.missingValue.map(t => `<button class="ghost sm" data-edit="${t.id}">${esc(t.counterparty)}</button>`).join(" ")} <span class="muted">toque para informar</span></div>` : ""}
   <div class="card">
-    <h3>Já gastei</h3>
+    <h3>Lançar gasto</h3>
     <form class="form" id="quick">
-      <div><label>Valor (R$)</label><input name="v" inputmode="decimal" placeholder="0,00" required></div>
-      <div><label>O quê</label><input name="d" placeholder="ex.: mercado" required></div>
-      <div><label>Categoria</label><select name="c">${catOptions("ALIMENTACAO")}</select></div>
-      <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
-      ${personSelect()}
-      ${paidWith}
+      ${expenseFields(accs)}
       <div><button>Registrar</button></div>
     </form>
   </div>
