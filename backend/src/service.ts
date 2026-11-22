@@ -66,7 +66,7 @@ export async function listTitles(db: Db, e: Entity, f: TitleFilter, asOf = today
 export interface TitleInput {
   kind: Kind; nature: Nature; counterparty: string; category?: string; amountCents: number;
   interestModel?: InterestModel; rateBp?: number; dueDate?: string | null; startDate?: string; notes?: string | null;
-  personId?: string | null; mandatory?: boolean | null;
+  personId?: string | null; mandatory?: boolean | null; negativado?: boolean;
   createdBy?: string;
   loan?: { interestModel: InterestModel; rateBp: number; dueDate?: string | null };
 }
@@ -106,7 +106,7 @@ export async function updateTitle(db: Db, e: Entity, id: string, p: Partial<Omit
   if (p.nature) validateNature(cur.kind, p.nature);
   if ("personId" in p) await assertPerson(db, e, p.personId);
   const map: Record<string, string> = { nature: "nature", counterparty: "counterparty", category: "category", amountCents: "amount_cents",
-    interestModel: "interest_model", rateBp: "rate_bp", dueDate: "due_date", startDate: "start_date", notes: "notes", personId: "person_id", mandatory: "mandatory" };
+    interestModel: "interest_model", rateBp: "rate_bp", dueDate: "due_date", startDate: "start_date", notes: "notes", personId: "person_id", mandatory: "mandatory", negativado: "negativado" };
   const sets: string[] = []; const vals: unknown[] = [];
   for (const [k, col] of Object.entries(map)) if (k in p) { vals.push((p as Record<string, unknown>)[k]); sets.push(`${col} = $${vals.length + 2}`); }
   if (!sets.length) return cur;

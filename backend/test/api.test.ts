@@ -545,5 +545,15 @@ describe("Bancos, cartões, empréstimos e ordem de pagamento", () => {
     const onlyThais = (await req("GET", `${P}/payoff-order?person=${thais}`)).json;
     expect(onlyThais.items.every((x: { ownerName: string }) => x.ownerName === "Thaís")).toBe(true);
     expect(onlyThais.unknownRates).toBeGreaterThanOrEqual(1);
+    // estratégias e custo de juros por mês
+    const quick = (await req("GET", `${P}/payoff-order?strategy=rapidas`)).json;
+    expect(quick.items.map((x: { openCents: number }) => x.openCents)).toEqual([...quick.items.map((x: { openCents: number }) => x.openCents)].sort((a, b) => a - b));
+    await req("PATCH", `${P}/accounts/${emp.json.id}`, { negativado: true });
+    const nome = (await req("GET", `${P}/payoff-order?strategy=nome`)).json;
+    expect(nome.items[0].negativado).toBe(true);
+    const parcela = nome.items.find((x: { monthlyRateBp: number }) => x.monthlyRateBp === 450);
+    expect(parcela.monthlyInterestCents).toBe(Math.round(45000 * 450 / 10000));
+    expect(nome.owners.find((o: { name: string }) => o.name === "Marcos").negativados).toBeGreaterThan(0);
+    expect((await req("GET", `${P}/payoff-order?strategy=xpto`)).status).toBe(400);
   });
 });

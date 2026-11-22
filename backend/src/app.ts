@@ -28,7 +28,7 @@ const titleCreate = z.object({
   kind, nature, counterparty: text(120), category: text(40).optional(), amountCents: cents,
   interestModel: model.optional(), rateBp: z.number().int().min(0).max(100000).optional(),
   dueDate: isoDate.nullable().optional(), startDate: isoDate.optional(), notes: z.string().max(500).nullable().optional(),
-  personId: personRef, mandatory: z.boolean().nullable().optional(),
+  personId: personRef, mandatory: z.boolean().nullable().optional(), negativado: z.boolean().optional(),
   loan: z.object({ interestModel: model, rateBp: z.number().int().min(0).max(100000), dueDate: isoDate.nullable().optional() }).optional(),
 }).strict();
 const titlePatch = titleCreate.omit({ kind: true, loan: true }).partial().strict();
@@ -70,7 +70,7 @@ const accountType = z.enum(["CHECKING", "SAVINGS", "INVESTMENT", "CARD", "LOAN",
 const day = z.number().int().min(1).max(31).nullable().optional();
 const accountCreate = z.object({ type: accountType, name: text(80), institution: z.string().trim().max(80).nullable().optional(), ownerPersonId: personRef,
   openingBalanceCents: z.number().int().min(-1e11).max(1e11).optional(), creditLimitCents: cents.nullable().optional(), closingDay: day, dueDay: day,
-  monthlyRateBp: z.number().int().min(0).max(100000).nullable().optional(), rateSource: z.string().trim().max(80).nullable().optional(), notes: z.string().trim().max(300).nullable().optional(),
+  monthlyRateBp: z.number().int().min(0).max(100000).nullable().optional(), rateSource: z.string().trim().max(80).nullable().optional(), notes: z.string().trim().max(300).nullable().optional(), negativado: z.boolean().optional(),
   currentBill: z.object({ amountCents: cents, dueDate: isoDate }).strict().nullable().optional(),
   loan: z.object({ installmentCents: positiveCents, remaining: z.number().int().min(1).max(480), firstOpenDueDate: isoDate, totalInstallments: z.number().int().min(1).max(480).nullable().optional() }).strict().nullable().optional() }).strict();
 const accountPatch = accountCreate.omit({ type: true, currentBill: true, loan: true }).partial().extend({ active: z.boolean().optional() }).strict();
@@ -304,7 +304,9 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.get("/:entity/payoff-order", async c => {
     const p = c.req.query("person");
     if (p && p !== "none" && !uuid.safeParse(p).success) throw new AppError(400, "INVALID_PARAM", "person inválido.");
-    return c.json(await accounts.payoffOrder(db, c.get("entity"), p === undefined ? undefined : p === "none" ? null : p, asOf(c)));
+    const st = c.req.query("strategy") ?? "juros";
+    if (!["juros", "rapidas", "nome"].includes(st)) throw new AppError(400, "INVALID_PARAM", "strategy: juros, rapidas ou nome.");
+    return c.json(await accounts.payoffOrder(db, c.get("entity"), p === undefined ? undefined : p === "none" ? null : p, asOf(c), st as accounts.Strategy));
   });
   v1.get("/:entity/ranking", async c => {
     const d = c.req.query("date") ?? todaySP();

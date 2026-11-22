@@ -29,7 +29,7 @@ async function assertOwner(db: Db, e: Entity, personId: string | null | undefine
 export interface AccountInput {
   type: AccountType; name: string; institution?: string | null; ownerPersonId?: string | null;
   openingBalanceCents?: number; creditLimitCents?: number | null; closingDay?: number | null; dueDay?: number | null;
-  monthlyRateBp?: number | null; rateSource?: string | null; notes?: string | null;
+  monthlyRateBp?: number | null; rateSource?: string | null; notes?: string | null; negativado?: boolean;
   /** Cartão: fatura atual em aberto (vira conta a pagar). */
   currentBill?: { amountCents: number; dueDate: string } | null;
   /** Empréstimo: parcelas em aberto a partir da mais antiga não paga (as que já venceram aparecem como atrasadas). */
@@ -42,10 +42,10 @@ export async function createAccount(db: Db, e: Entity, u: SessionUser, i: Accoun
   const inst = await institutionId(db, e, i.institution);
   return withTx(db, async c => {
     const r = await c.query(`INSERT INTO account (entity_code, institution_id, owner_person_id, type, name, opening_balance_cents, credit_limit_cents,
-        closing_day, due_day, monthly_rate_bp, rate_source, notes, created_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+        closing_day, due_day, monthly_rate_bp, rate_source, notes, created_by, negativado)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
       [e, inst, i.ownerPersonId ?? null, i.type, i.name.trim(), ["CARD", "LOAN"].includes(i.type) ? 0 : i.openingBalanceCents ?? 0,
-       i.creditLimitCents ?? null, i.closingDay ?? null, i.dueDay ?? null, i.monthlyRateBp ?? null, i.rateSource?.trim() || null, i.notes?.trim() || null, u.id]);
+       i.creditLimitCents ?? null, i.closingDay ?? null, i.dueDay ?? null, i.monthlyRateBp ?? null, i.rateSource?.trim() || null, i.notes?.trim() || null, u.id, i.negativado ?? false]);
     const id = r.rows[0].id as string;
     const label = i.institution?.trim() ? `${i.institution.trim()} · ${i.name.trim()}` : i.name.trim();
     if (i.type === "CARD" && i.currentBill && i.currentBill.amountCents > 0)
@@ -72,7 +72,7 @@ export async function createAccount(db: Db, e: Entity, u: SessionUser, i: Accoun
 export async function updateAccount(db: Db, e: Entity, id: string, p: Partial<Omit<AccountInput, "type" | "currentBill" | "loan">> & { active?: boolean }) {
   if ("ownerPersonId" in p) await assertOwner(db, e, p.ownerPersonId);
   const map: Record<string, string> = { name: "name", ownerPersonId: "owner_person_id", openingBalanceCents: "opening_balance_cents", creditLimitCents: "credit_limit_cents",
-    closingDay: "closing_day", dueDay: "due_day", monthlyRateBp: "monthly_rate_bp", rateSource: "rate_source", notes: "notes", active: "active" };
+    closingDay: "closing_day", dueDay: "due_day", monthlyRateBp: "monthly_rate_bp", rateSource: "rate_source", notes: "notes", active: "active", negativado: "negativado" };
   const sets: string[] = []; const vals: unknown[] = [];
   for (const [k, col] of Object.entries(map)) if (k in p) { vals.push((p as Record<string, unknown>)[k]); sets.push(`${col} = $${vals.length + 2}`); }
   if (p.institution !== undefined) { vals.push(await institutionId(db, e, p.institution)); sets.push(`institution_id = $${vals.length + 2}`); }
@@ -103,10 +103,10 @@ export async function createTransfer(db: Db, e: Entity, u: SessionUser, i: { fro
 
 /* ---------- Visões ---------- */
 interface OpenTitle { id: string; counterparty: string; nature: string; category: string; amount_cents: number; due_date: string | null; person_id: string | null;
-  account_id: string | null; interest_model: string; rate_bp: number; settled: number; installment_no: number | null; installment_total: number | null; }
+  account_id: string | null; interest_model: string; rate_bp: number; settled: number; installment_no: number | null; installment_total: number | null; negativado: boolean; }
 async function openPayables(db: Db, e: Entity): Promise<(OpenTitle & { open: number })[]> {
   const rows = (await db.query(`SELECT t.id, t.counterparty, t.nature, t.category, t.amount_cents, t.due_date::text AS due_date, t.person_id, t.account_id,
-      t.interest_model, t.rate_bp, t.installment_no, t.installment_total,
+      t.interest_model, t.rate_bp, t.installment_no, t.installment_total, t.negativado,
       COALESCE((SELECT sum(s.amount_cents) FROM settlement s WHERE s.title_id = t.id AND s.deleted_at IS NULL), 0)::bigint AS settled
     FROM title t WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.deleted_at IS NULL`, [e])).rows as OpenTitle[];
   return rows.map(r => {
@@ -134,7 +134,7 @@ export async function listAccounts(db: Db, e: Entity, asOf = todaySP()) {
     const openCents = linked.reduce((s, t) => s + t.open, 0);
     return {
       id: a.id, type: a.type as AccountType, name: a.name, institution: a.institution, ownerPersonId: a.owner_person_id, ownerName: a.owner_name ?? "Dos dois",
-      active: a.active, notes: a.notes, monthlyRateBp: a.monthly_rate_bp, rateSource: a.rate_source,
+      active: a.active, notes: a.notes, monthlyRateBp: a.monthly_rate_bp, rateSource: a.rate_source, negativado: a.negativado,
       creditLimitCents: a.credit_limit_cents == null ? null : Number(a.credit_limit_cents), closingDay: a.closing_day, dueDay: a.due_day,
       openingBalanceCents: Number(a.opening_balance_cents), openingDate: a.opening_date_s,
       balanceCents: isCash ? Number(a.opening_balance_cents) + (flows.get(a.id) ?? 0) + transfers : null,
@@ -169,12 +169,15 @@ export async function overview(db: Db, e: Entity, asOf = todaySP()) {
   return { asOf, people: rows };
 }
 
+export type Strategy = "juros" | "rapidas" | "nome";
 /**
- * Ordem sugerida de pagamento (regra, sem IA):
- * 1) atrasados primeiro (risco de multa, juros e nome sujo), do maior juro para o menor e, empatando, o mais antigo;
- * 2) depois os que vencem, do maior juro para o menor; juro desconhecido fica no meio (com aviso) e, empatando, o que vence antes.
+ * Ordem sugerida de pagamento (regra, sem IA), em três estratégias para comparar:
+ * - juros   (padrão): atrasados primeiro; depois maior juro. Economiza mais dinheiro.
+ * - rapidas : menor saldo primeiro (bola de neve). Fecha dívidas rápido e motiva.
+ * - nome    : negativadas primeiro, depois as atrasadas há mais tempo. Limpa o nome antes.
+ * Cada item traz o custo estimado de juros por mês (saldo × taxa); juro desconhecido não entra na soma.
  */
-export async function payoffOrder(db: Db, e: Entity, personId?: string | null, asOf = todaySP()) {
+export async function payoffOrder(db: Db, e: Entity, personId?: string | null, asOf = todaySP(), strategy: Strategy = "juros") {
   const accounts = new Map((await listAccounts(db, e, asOf)).map(a => [a.id, a]));
   const people = new Map((await db.query("SELECT id, name FROM person WHERE entity_code = $1", [e])).rows.map(r => [r.id, r.name]));
   const items = (await openPayables(db, e))
@@ -182,17 +185,32 @@ export async function payoffOrder(db: Db, e: Entity, personId?: string | null, a
     .filter(t => personId === undefined || (t.person_id ?? null) === personId)
     .map(t => {
       const acc = t.account_id ? accounts.get(t.account_id) : undefined;
-      const rate = acc?.monthlyRateBp ?? (t.rate_bp ? t.rate_bp : null); // título com juros (ex.: 15%) conta como taxa do ciclo
+      const rate = acc?.monthlyRateBp ?? (t.rate_bp ? t.rate_bp : null);
       const days = t.due_date && t.due_date < asOf ? daysBetween(t.due_date, asOf) : 0;
+      const neg = t.negativado || !!acc?.negativado;
       const reasons: string[] = [];
+      if (neg) reasons.push("nome negativado");
       if (days) reasons.push(`atrasado há ${days} dia${days > 1 ? "s" : ""}`);
-      if (rate != null) reasons.push(`juros de ${(rate / 100).toLocaleString("pt-BR")}% ao mês`);
-      else reasons.push("juros não informado");
+      reasons.push(rate != null ? `juros de ${(rate / 100).toLocaleString("pt-BR")}% ao mês` : "juros não informado");
       if (t.nature === "CARD") reasons.push("pagar a fatura inteira evita juros");
-      return { titleId: t.id, name: t.counterparty, ownerName: t.person_id ? people.get(t.person_id) ?? "?" : "Dos dois / casa", nature: t.nature,
-        openCents: t.open, dueDate: t.due_date, daysOverdue: days, monthlyRateBp: rate, institution: acc?.institution ?? null, reasons };
+      return { titleId: t.id, name: t.counterparty, ownerId: t.person_id, ownerName: t.person_id ? people.get(t.person_id) ?? "?" : "Dos dois / casa", nature: t.nature,
+        openCents: t.open, dueDate: t.due_date, daysOverdue: days, monthlyRateBp: rate, negativado: neg,
+        monthlyInterestCents: rate != null ? Math.round(t.open * rate / 10000) : null, institution: acc?.institution ?? null, reasons };
     });
   const r = (x: { monthlyRateBp: number | null }) => x.monthlyRateBp ?? 1000; // desconhecido ≈ 10% a.m. só para ordenar
-  items.sort((a, b) => (b.daysOverdue > 0 ? 1 : 0) - (a.daysOverdue > 0 ? 1 : 0) || r(b) - r(a) || b.daysOverdue - a.daysOverdue || (a.dueDate ?? "9").localeCompare(b.dueDate ?? "9"));
-  return { asOf, totalCents: items.reduce((s, x) => s + x.openCents, 0), unknownRates: items.filter(x => x.monthlyRateBp == null).length, items };
+  const due = (x: { dueDate: string | null }) => x.dueDate ?? "9";
+  if (strategy === "rapidas") items.sort((a, b) => a.openCents - b.openCents || r(b) - r(a));
+  else if (strategy === "nome") items.sort((a, b) => Number(b.negativado) - Number(a.negativado) || b.daysOverdue - a.daysOverdue || r(b) - r(a));
+  else items.sort((a, b) => (b.daysOverdue > 0 ? 1 : 0) - (a.daysOverdue > 0 ? 1 : 0) || r(b) - r(a) || b.daysOverdue - a.daysOverdue || due(a).localeCompare(due(b)));
+  // Resumo por dono: quanto deve, quanto paga de juros por mês, atrasos e negativações.
+  const byOwner = new Map<string, { name: string; openCents: number; monthlyInterestCents: number; overdueCount: number; negativados: number; unknownRates: number; count: number }>();
+  for (const x of items) {
+    const k = x.ownerName, o = byOwner.get(k) ?? { name: k, openCents: 0, monthlyInterestCents: 0, overdueCount: 0, negativados: 0, unknownRates: 0, count: 0 };
+    o.openCents += x.openCents; o.monthlyInterestCents += x.monthlyInterestCents ?? 0; o.count++;
+    if (x.daysOverdue) o.overdueCount++; if (x.negativado) o.negativados++; if (x.monthlyRateBp == null) o.unknownRates++;
+    byOwner.set(k, o);
+  }
+  return { asOf, strategy, totalCents: items.reduce((s, x) => s + x.openCents, 0),
+    monthlyInterestCents: items.reduce((s, x) => s + (x.monthlyInterestCents ?? 0), 0),
+    unknownRates: items.filter(x => x.monthlyRateBp == null).length, owners: [...byOwner.values()], items };
 }

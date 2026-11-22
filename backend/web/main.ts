@@ -668,10 +668,12 @@ type AccType = "CHECKING" | "SAVINGS" | "INVESTMENT" | "CARD" | "LOAN" | "CASH";
 interface Acc { id: string; type: AccType; name: string; institution: string | null; ownerPersonId: string | null; ownerName: string; active: boolean; notes: string | null;
   monthlyRateBp: number | null; rateSource: string | null; creditLimitCents: number | null; closingDay: number | null; dueDay: number | null;
   openingBalanceCents: number; openingDate: string; balanceCents: number | null; openCents: number; openCount: number; availableLimitCents: number | null;
-  overdueCents: number; overdueCount: number; maxDaysOverdue: number; }
+  overdueCents: number; overdueCount: number; maxDaysOverdue: number; negativado: boolean; }
 interface OwnerRow { personId: string | null; name: string; cashCents: number; savedCents: number; cardsOpenCents: number; cardsLimitFreeCents: number;
   debtCents: number; overdueCents: number; overdueCount: number; maxDaysOverdue: number; netWorthCents: number; }
-interface Payoff { totalCents: number; unknownRates: number; items: { titleId: string; name: string; ownerName: string; nature: string; openCents: number; dueDate: string | null;
+interface Payoff { totalCents: number; unknownRates: number; monthlyInterestCents: number;
+  owners: { name: string; openCents: number; monthlyInterestCents: number; overdueCount: number; negativados: number; unknownRates: number; count: number }[];
+  items: { titleId: string; name: string; ownerName: string; nature: string; openCents: number; dueDate: string | null; negativado: boolean; monthlyInterestCents: number | null;
   daysOverdue: number; monthlyRateBp: number | null; institution: string | null; reasons: string[] }[]; }
 const ACC_TYPE: Record<AccType, string> = { CHECKING: "Conta / carteira digital", SAVINGS: "Poupança / reserva", INVESTMENT: "Investimento", CARD: "Cartão de crédito", LOAN: "Empréstimo / financiamento", CASH: "Dinheiro em espécie" };
 const BANKS = ["Nubank", "Inter", "Itaú", "Bradesco", "Banco do Brasil", "Caixa", "Santander", "C6 Bank", "Mercado Pago", "PicPay", "PagBank", "Cora", "Neon", "Will Bank",
@@ -680,8 +682,12 @@ const isCashAcc = (t: AccType) => t === "CHECKING" || t === "SAVINGS" || t === "
 const rateTxt = (bp: number | null) => (bp == null ? "juros não informado" : `${(bp / 100).toLocaleString("pt-BR")}% ao mês`);
 
 let bkOwner = ""; // "" = todos; "none" = dos dois; id da pessoa
+let bkStrategy: "juros" | "rapidas" | "nome" = "juros";
+const STRATEGY = { juros: ["Menos juros", "Atrasados e depois os juros mais altos. Economiza mais dinheiro."],
+  rapidas: ["Vitórias rápidas", "Menores primeiro. Fecha dívidas rápido e dá fôlego."],
+  nome: ["Limpar o nome", "Negativadas e as atrasadas há mais tempo primeiro."] } as const;
 async function bancosPage() {
-  const q = bkOwner ? `?person=${bkOwner}` : "";
+  const q = `?strategy=${bkStrategy}${bkOwner ? `&person=${bkOwner}` : ""}`;
   const [accs, ov, po] = await Promise.all([api<Acc[]>("/accounts"), api<{ people: OwnerRow[] }>("/overview"), api<Payoff>(`/payoff-order${q}`)]);
   const owners = [{ id: "", name: "Todos" }, ...people.filter(p => p.active).map(p => ({ id: p.id, name: p.name })), { id: "none", name: "Dos dois / casa" }];
   const shown = accs.filter(a => a.active && (bkOwner === "" || (bkOwner === "none" ? !a.ownerPersonId : a.ownerPersonId === bkOwner)));
@@ -700,7 +706,8 @@ async function bancosPage() {
       <span class="amt">${isCashAcc(a.type) ? money(a.balanceCents ?? 0) : money(a.openCents)}</span></div>
     <div class="meta"><span class="chip">${ACC_TYPE[a.type]}</span><span class="chip person">👤 ${esc(a.ownerName)}</span>
       ${a.overdueCount ? `<span class="chip OVERDUE">${a.overdueCount} atrasada(s) · ${a.maxDaysOverdue} dias · ${money(a.overdueCents)}</span>` : ""}
-      ${a.type === "CARD" || a.type === "LOAN" ? `<span class="chip ${a.monthlyRateBp == null ? "NO_VALUE" : ""}">${rateTxt(a.monthlyRateBp)}</span>` : ""}</div>
+      ${a.type === "CARD" || a.type === "LOAN" ? `<span class="chip ${a.monthlyRateBp == null ? "NO_VALUE" : ""}">${rateTxt(a.monthlyRateBp)}</span>` : ""}
+      ${a.negativado ? `<span class="chip OVERDUE">nome negativado</span>` : ""}</div>
     <div class="muted" style="margin-top:4px">${a.type === "CARD" ? `Limite ${a.creditLimitCents != null ? money(a.creditLimitCents) : "não informado"}${a.availableLimitCents != null ? ` · livre ${money(a.availableLimitCents)}` : ""}${a.closingDay ? ` · fecha dia ${a.closingDay}` : ""}${a.dueDay ? ` · vence dia ${a.dueDay}` : ""} · em aberto ${money(a.openCents)}`
       : a.type === "LOAN" ? `${a.openCount} parcela(s) em aberto · ${money(a.openCents)}`
       : `Saldo informado ${money(a.openingBalanceCents)} em ${br(a.openingDate)}`}${a.notes ? ` · ${esc(a.notes)}` : ""}</div>
@@ -714,10 +721,14 @@ async function bancosPage() {
   ${ov.people.filter(o => bkOwner === "" || (bkOwner === "none" ? o.personId === null : o.personId === bkOwner)).map(card).join("")}
   <h3 style="margin-top:20px">Produtos</h3>
   <div class="list">${shown.map(item).join("") || `<div class="empty">Nada cadastrado ainda. Toque em "+ Adicionar".</div>`}</div>
-  <div class="card" style="margin-top:20px"><div class="row spread"><h3 style="margin:0">Ordem sugerida de pagamento</h3><span class="muted">total ${money(po.totalCents)}</span></div>
-    <p class="muted">Regra: primeiro o que está atrasado, depois os juros mais altos. ${po.unknownRates ? `<b>${po.unknownRates} item(ns) sem juros informado</b>: complete a taxa (está na fatura, campo CET) ou espere a pesquisa.` : ""}</p>
+  <div class="card" style="margin-top:20px"><div class="row spread"><h3 style="margin:0">Por onde começar</h3><span class="muted">total ${money(po.totalCents)} · juros ≈ <b class="neg">${money(po.monthlyInterestCents)}/mês</b></span></div>
+    <div class="scroll" style="margin-top:10px"><table><tr><th>De quem</th><th>Deve</th><th>Juros por mês</th><th>Atrasadas</th><th>Negativadas</th></tr>
+      ${po.owners.map(o => `<tr><td>${esc(o.name)}</td><td>${money(o.openCents)}</td><td class="${o.monthlyInterestCents ? "neg" : ""}">${money(o.monthlyInterestCents)}${o.unknownRates ? ` <span class="muted">+ ${o.unknownRates} sem taxa</span>` : ""}</td>
+        <td>${o.overdueCount}</td><td>${o.negativados}</td></tr>`).join("")}</table></div>
+    <div class="person-tabs" style="margin-top:14px">${(Object.keys(STRATEGY) as (keyof typeof STRATEGY)[]).map(k => `<button class="${bkStrategy === k ? "on" : ""}" data-strategy="${k}">${STRATEGY[k][0]}</button>`).join("")}</div>
+    <p class="muted">${STRATEGY[bkStrategy][1]} ${po.unknownRates ? `<b>${po.unknownRates} item(ns) sem juros informado</b>: complete a taxa (fatura, linha CET) ou espere a pesquisa.` : ""}</p>
     ${po.items.length ? `<ol class="payoff">${po.items.map(x => `<li><div class="row spread"><b>${esc(x.name)}</b><span class="${x.daysOverdue ? "neg" : ""}">${money(x.openCents)}</span></div>
-      <span class="muted">${esc(x.ownerName)} · ${x.dueDate ? `vence ${br(x.dueDate)}` : "sem data"} · ${x.reasons.map(esc).join(" · ")}</span></li>`).join("")}</ol>` : `<p class="muted">Nenhuma dívida em aberto.</p>`}</div>`;
+      <span class="muted">${esc(x.ownerName)} · ${x.dueDate ? `vence ${br(x.dueDate)}` : "sem data"} · ${x.reasons.map(esc).join(" · ")}${x.monthlyInterestCents ? ` · custa ≈ ${money(x.monthlyInterestCents)}/mês` : ""}</span></li>`).join("")}</ol>` : `<p class="muted">Nenhuma dívida em aberto.</p>`}</div>`;
 }
 
 function accForm(a?: Acc) {
@@ -742,6 +753,7 @@ function accForm(a?: Acc) {
     <div data-f="card loan"><label>Juros ao mês (%)</label><input name="rate" inputmode="decimal" placeholder="se souber" value="${a?.monthlyRateBp != null ? String(a.monthlyRateBp / 100).replace(".", ",") : ""}"></div>
     <div data-f="card loan"><label>Fonte dos juros</label><input name="src" maxlength="80" placeholder="ex.: fatura (CET)" value="${esc(a?.rateSource)}"></div>
     <div class="full"><label>Observação</label><input name="notes" maxlength="300" value="${esc(a?.notes)}"></div>
+    <label class="inline full" data-f="card loan"><input type="checkbox" name="neg" ${a?.negativado ? "checked" : ""}> Nome negativado por essa dívida (Serasa/SPC)</label>
     ${a ? `<label class="inline full"><input type="checkbox" name="active" ${a.active ? "checked" : ""}> Ativo</label>` : ""}`;
 }
 function wireAccForm(fixed?: AccType) {
@@ -760,7 +772,7 @@ function newAccount() {
     const body: Record<string, unknown> = { type, name: str(f, "name"), institution: str(f, "inst") || null, ownerPersonId: str(f, "owner") || null,
       notes: str(f, "notes") || null };
     if (isCashAcc(type)) body.openingBalanceCents = centsOf(f, "bal", false) ?? 0;
-    if (type === "CARD" || type === "LOAN") Object.assign(body, { monthlyRateBp: rateOf(f), rateSource: str(f, "src") || null, dueDay: intOf(f, "due") });
+    if (type === "CARD" || type === "LOAN") Object.assign(body, { monthlyRateBp: rateOf(f), rateSource: str(f, "src") || null, dueDay: intOf(f, "due"), negativado: f.has("neg") });
     if (type === "CARD") {
       Object.assign(body, { creditLimitCents: centsOf(f, "lim", false), closingDay: intOf(f, "close") });
       const bill = centsOf(f, "bill", false);
@@ -780,7 +792,7 @@ async function editAccount(id: string) {
   openDialog(`Editar · ${a.institution ?? ""} ${a.name}`, accForm(a), "Salvar", async f => {
     const body: Record<string, unknown> = { name: str(f, "name"), institution: str(f, "inst") || null, ownerPersonId: str(f, "owner") || null, notes: str(f, "notes") || null, active: f.has("active") };
     if (isCashAcc(a.type)) body.openingBalanceCents = centsOf(f, "bal", false) ?? 0;
-    if (a.type === "CARD" || a.type === "LOAN") Object.assign(body, { monthlyRateBp: rateOf(f), rateSource: str(f, "src") || null, dueDay: intOf(f, "due") });
+    if (a.type === "CARD" || a.type === "LOAN") Object.assign(body, { monthlyRateBp: rateOf(f), rateSource: str(f, "src") || null, dueDay: intOf(f, "due"), negativado: f.has("neg") });
     if (a.type === "CARD") Object.assign(body, { creditLimitCents: centsOf(f, "lim", false), closingDay: intOf(f, "close") });
     await api(`/accounts/${id}`, { method: "PATCH", body });
     toast("Alterado.");
@@ -1041,6 +1053,7 @@ view.addEventListener("click", async e => {
     else if (d.bill) billDialog(d.bill);
     else if (d.transfer) await transferDialog(d.transfer);
     else if (d.bkowner !== undefined) { bkOwner = d.bkowner; await render(); }
+    else if (d.strategy) { bkStrategy = d.strategy as typeof bkStrategy; await render(); }
     else if (d.cbperson !== undefined) { cbView = d.cbperson; scrollTo(0, 0); await render(); }
     else if (d.sporadic) { await api("/conduct/sporadic", { method: "POST", body: { ruleId: d.sporadic, personId: d.person, day: today(), active: d.val === "true" } }); toast(d.val === "true" ? "Tarefa ativada para hoje." : "Tarefa desativada."); await render(); }
     else if (d.blame) await blameDialog(d.blame, d.person!, d.day!);
