@@ -12,8 +12,8 @@ export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
 
 /** URL do banco: DATABASE_URL, ou os nomes que a integração Neon da Vercel pode criar. */
-export const databaseUrl = () =>
-  process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.STORAGE_URL ?? process.env.NEON_DATABASE_URL ?? undefined;
+export const DB_URL_NAMES = ["DATABASE_URL", "DATABASE_POSTGRES_URL", "DATABASE_DATABASE_URL", "POSTGRES_URL", "STORAGE_URL", "STORAGE_POSTGRES_URL", "NEON_DATABASE_URL"];
+export const databaseUrl = () => DB_URL_NAMES.map(n => process.env[n]).find(Boolean);
 
 export function createPool(url = databaseUrl()): Db {
   if (!url) throw new Error("DATABASE_URL não definida");

@@ -1,12 +1,12 @@
 import { pathToFileURL } from "node:url";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createPool } from "../src/db.js";
+import { createPool, databaseUrl } from "../src/db.js";
 
 try { process.loadEnvFile(".env"); } catch { /* ok */ }
 
 /** Cria o banco se ele não existir (dispensa usar psql na instalação). */
-export async function ensureDatabase(url = process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.STORAGE_URL) {
+export async function ensureDatabase(url = databaseUrl()) {
   if (!url) throw new Error("DATABASE_URL não definida");
   // Se o banco já existe (ex.: Neon na Vercel), não faz nada.
   const probe = createPool(url);
@@ -25,7 +25,7 @@ export async function ensureDatabase(url = process.env.DATABASE_URL ?? process.e
 
 /** Aplica migrações SQL versionadas em ordem, uma vez cada, dentro de transação. */
 export async function migrate(url?: string): Promise<string[]> {
-  await ensureDatabase(url ?? process.env.DATABASE_URL);
+  await ensureDatabase(url ?? databaseUrl());
   const db = createPool(url);
   const applied: string[] = [];
   try {
