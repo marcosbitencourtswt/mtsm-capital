@@ -19,7 +19,8 @@
     "dev:web": "esbuild web/main.ts --bundle --format=esm --target=es2022 --sourcemap --outfile=public/app.js --watch",
     "user:create": "tsx scripts/user-create.ts",
     "build:vercel": "node scripts/build-vercel.mjs",
-    "migrate:ci": "node scripts/migrate-ci.mjs"
+    "migrate:ci": "node scripts/migrate-ci.mjs",
+    "test:e2e": "npm run build:web && tsx test/e2e/smoke.e2e.mts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.11",
