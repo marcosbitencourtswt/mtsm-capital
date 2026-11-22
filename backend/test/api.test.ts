@@ -1131,3 +1131,49 @@ describe("Importar gastos (cupons lidos no chat)", () => {
     expect(p2.status).toBe("ja_existe"); expect(p2.summary).toContain('provável duplicado de "mercado"');
   });
 });
+
+describe("Caixa de cupons e leitor com chave limitada", () => {
+  it("envia, lista por permissão, o leitor só vê a caixa, marca lido, chave revogada para de funcionar e a limpeza apaga", async () => {
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(300, 7)]).toString("base64");
+    const login = async (email: string, pw: string) => ((await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password: pw }) })).headers.get("set-cookie") ?? "").split(";")[0]!;
+    const pid = (await req("POST", `${P}/people`, { name: "Criança Cupom" })).json.id;
+    await req("POST", "/api/v1/admin/users", { email: "cupom-kid@familia.test", name: "Kid Cupom", personId: pid, conductOnly: true, password: "frase-longa-cupom-12" });
+    await db.query("UPDATE app_user SET must_change_password = false WHERE email = 'cupom-kid@familia.test'");
+    const kid = await login("cupom-kid@familia.test", "frase-longa-cupom-12");
+
+    // só imagem de verdade
+    expect((await req("POST", `${P}/receipts`, { image: Buffer.from("nao sou imagem".repeat(20)).toString("base64") }, { cookie: kid })).json.error.code).toBe("NOT_IMAGE");
+    const up = await req("POST", `${P}/receipts`, { image: jpeg, note: "lanche" }, { cookie: kid });
+    expect(up.status).toBe(201);
+    const mine = (await req("GET", `${P}/receipts`, undefined, { cookie: kid })).json;
+    expect(mine).toHaveLength(1); expect(mine[0]).toMatchObject({ personName: "Criança Cupom", status: "PENDING", note: "lanche" });
+    expect((await req("GET", `${P}/receipts/${up.json.id}/image`, undefined, { cookie: kid })).status).toBe(200);
+    const adminUp = (await req("POST", `${P}/receipts`, { image: jpeg })).json;
+    expect((await req("GET", `${P}/receipts/${adminUp.id}/image`, undefined, { cookie: kid })).status).toBe(404); // não vê cupom dos outros
+
+    // leitor: sem chave não entra; chave só o root cria
+    expect((await app.request("/api/v1/worker/receipts")).status).toBe(401);
+    const tok = (await req("POST", "/api/v1/admin/worker-tokens", { days: 30 })).json;
+    expect(tok.token).toMatch(/^mtsm_rcpt_/);
+    const W = { authorization: `Bearer ${tok.token}` };
+    const pend = await (await app.request("/api/v1/worker/receipts", { headers: W })).json();
+    expect(pend.length).toBeGreaterThanOrEqual(2);
+    expect(Object.keys(pend[0])).not.toContain("balanceCents");
+    // a chave do leitor não abre nenhuma outra parte do sistema
+    expect((await app.request(`${P}/accounts`, { headers: W })).status).toBe(401);
+    const img = await app.request(`/api/v1/worker/receipts/${up.json.id}/image`, { headers: W });
+    expect(img.headers.get("content-type")).toBe("image/jpeg");
+    expect((await app.request(`/api/v1/worker/receipts/${up.json.id}/read`, { method: "POST", headers: W })).status).toBe(204);
+    expect((await req("GET", `${P}/receipts`, undefined, { cookie: kid })).json[0].status).toBe("READ");
+
+    // revogar: para de funcionar
+    await req("DELETE", `/api/v1/admin/worker-tokens/${tok.id}`);
+    expect((await app.request("/api/v1/worker/receipts", { headers: W })).status).toBe(401);
+
+    // limpeza: lido há mais de 7 dias sai
+    await db.query("UPDATE receipt_inbox SET read_at = now() - interval '8 days' WHERE id = $1", [up.json.id]);
+    const { purge } = await import("../src/receipts.js");
+    expect(await purge(db)).toBeGreaterThanOrEqual(1);
+    expect((await db.query("SELECT count(*)::int AS n FROM receipt_inbox WHERE id = $1", [up.json.id])).rows[0].n).toBe(0);
+  });
+});

@@ -10,6 +10,7 @@ import * as push from "./push.js";
 import * as statement from "./statement.js";
 import * as budget from "./budget.js";
 import * as requests from "./requests.js";
+import * as receipts from "./receipts.js";
 import { report } from "./report.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
@@ -172,6 +173,7 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     for (const e of ["PERSONAL", "BYTE4TECH"] as const) for (const m of [cur, addMonths(cur, 1).slice(0, 7)]) out.push({ entity: e, ...(await svc.generateRecurrences(db, e, m)) });
     await conduct.materializeMisses(db); // faltas de hábito do dia anterior
     const pruned = await admin.pruneAudit(db, await admin.getRetention(db)); // retenção do registro de alterações
+    await receipts.purge(db); // fotos de cupom lidas saem em 7 dias
     const pushed = await safePush(() => dailyReminders());
     return c.json({ recurrences: out, auditPruned: pruned, pushed });
   });
@@ -179,6 +181,8 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   const CONDUCT_ONLY_ALLOWED: [string, RegExp][] = [
     ["GET", /^\/api\/v1\/auth\/me$/], ["POST", /^\/api\/v1\/auth\/password$/], ["POST", /^\/api\/v1\/auth\/2fa\/(setup|enable|disable)$/],
     ["GET", /^\/api\/v1\/personal\/people$/], ["GET", /^\/api\/v1\/personal\/conduct\/(board|rules|allowance)$/], ["POST", /^\/api\/v1\/personal\/conduct\/checks$/],
+    ["GET", /^\/api\/v1\/personal\/receipts$/], ["POST", /^\/api\/v1\/personal\/receipts$/], ["GET", /^\/api\/v1\/personal\/receipts\/[0-9a-f-]{36}\/image$/],
+    ["POST", /^\/api\/v1\/personal\/receipts\/[0-9a-f-]{36}\/discard$/],
     ["GET", /^\/api\/v1\/personal\/requests(\/sources)?$/], ["POST", /^\/api\/v1\/personal\/requests$/], ["POST", /^\/api\/v1\/personal\/requests\/[0-9a-f-]{36}\/cancel$/],
     ["GET", /^\/api\/v1\/push\/(key|status)$/], ["POST", /^\/api\/v1\/push\/(subscribe|unsubscribe|test)$/],
   ];
@@ -215,6 +219,16 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     if (today.endsWith("-03")) n += await push.notify(db, to, { title: "O mês anterior fecha dia 5", body: "Lance até dia 4 o que faltou. Depois, só o root corrige.", url: "/#painel", tag: "fechamento" });
     return n;
   }
+  /* ---- Leitor de cupons (chave limitada, sem login): só a caixa de cupons ---- */
+  const imgType = (b: Buffer) => (b[0] === 0x89 ? "image/png" : b.subarray(8, 12).toString() === "WEBP" ? "image/webp" : "image/jpeg");
+  v1.get("/worker/receipts", async c => { await receipts.workerAuth(db, c.req.header("authorization")); return c.json(await receipts.workerPending(db)); });
+  v1.get("/worker/receipts/:id/image", async c => {
+    await receipts.workerAuth(db, c.req.header("authorization"));
+    const b = await receipts.workerImage(db, param(c, "id"));
+    return c.body(new Uint8Array(b), 200, { "content-type": imgType(b), "cache-control": "no-store" });
+  });
+  v1.post("/worker/receipts/:id/read", async c => { await receipts.workerAuth(db, c.req.header("authorization")); await receipts.workerMarkRead(db, param(c, "id")); return c.body(null, 204); });
+
   /* ---- Login ---- */
   const clientIp = (c: Context) => (c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "").split(",")[0]!.trim() || undefined;
   const cookieOpts = (c: Context) => ({ httpOnly: true, sameSite: "Lax" as const, path: "/",
@@ -280,6 +294,12 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   });
   v1.post("/push/unsubscribe", async c => { await push.unsubscribe(db, c.get("user").id, (await body(c, z.object({ endpoint: z.string().max(1000) }).strict())).endpoint); return c.body(null, 204); });
   v1.post("/push/test", async c => c.json({ sent: await push.notify(db, [c.get("user").id], { title: "MTSM Capital", body: "Avisos ligados neste aparelho. ✓", url: "/", tag: "teste" }) }));
+  v1.get("/admin/worker-tokens", async c => { requireAdmin(c); return c.json(await receipts.listTokens(db)); });
+  v1.post("/admin/worker-tokens", async c => {
+    const i = await body(c, z.object({ label: z.string().trim().max(60).optional(), days: z.number().int().min(1).max(365).optional() }).strict());
+    return c.json(await receipts.createToken(db, c.get("user"), i.label ?? "Leitor de cupons", i.days ?? 90), 201);
+  });
+  v1.delete("/admin/worker-tokens/:id", async c => { await receipts.revokeToken(db, c.get("user"), param(c, "id")); return c.body(null, 204); });
   v1.get("/admin/users", async c => { requireAdmin(c); return c.json(await auth.listUsers(db)); });
   v1.post("/admin/users", async c => { requireAdmin(c); return c.json(await auth.createUser(db, await body(c, userCreate), c.get("user")), 201); });
   v1.patch("/admin/users/:id", async c => { requireAdmin(c); return c.json(await auth.updateUser(db, param(c, "id"), await body(c, userPatch), c.get("user"))); });
@@ -430,6 +450,18 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     if (!isoMonth.safeParse(m).success) throw new AppError(400, "INVALID_PARAM", "month inválido (AAAA-MM).");
     return c.json(await report(db, c.get("entity"), m, asOf(c)));
   });
+  // Caixa de cupons (cada um envia a foto; o Marcos pede ao Claude para ler)
+  v1.get("/:entity/receipts", async c => c.json(await receipts.list(db, c.get("entity"), c.get("user"))));
+  v1.post("/:entity/receipts", async c => {
+    const i = await body(c, z.object({ image: z.string().min(100).max(2_100_000).regex(/^[A-Za-z0-9+/=]+$/), accountId: uuid.nullable().optional(),
+      note: z.string().trim().max(200).nullable().optional(), personId: uuid.nullable().optional() }).strict());
+    return c.json(await receipts.upload(db, c.get("entity"), c.get("user"), i), 201);
+  });
+  v1.get("/:entity/receipts/:id/image", async c => {
+    const b = await receipts.image(db, c.get("entity"), c.get("user"), param(c, "id"));
+    return c.body(new Uint8Array(b), 200, { "content-type": imgType(b), "cache-control": "private, no-store" });
+  });
+  v1.post("/:entity/receipts/:id/discard", async c => { await receipts.discard(db, c.get("entity"), c.get("user"), param(c, "id")); return c.body(null, 204); });
   // Pedidos de compra com autorização
   v1.get("/:entity/requests/sources", async c => c.json(await requests.sources(db, c.get("entity"))));
   v1.get("/:entity/requests", async c => c.json(await requests.list(db, c.get("entity"), c.get("user"))));

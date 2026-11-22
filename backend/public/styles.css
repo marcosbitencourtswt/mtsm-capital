@@ -370,3 +370,5 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
   #more-tabs[hidden] { display: contents !important; }
   .more-toggle { display: none !important; }
 }
+.rc-btn { width: 100%; justify-content: center; height: 44px; background: var(--primary); color: var(--on-primary); border-color: transparent; position: relative; }
+.rc-btn:hover { background: var(--primary-hover); }

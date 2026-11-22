@@ -133,6 +133,7 @@ async function painel() {
   ${pendingCard(pendingCache)}
   ${ds ? debtBoard(ds) : ""}
   ${budgetCard(budgetCache)}
+  ${personal ? await receiptCard() : ""}
   ${cb ? todayCard(cb) : ""}
   ${rk ? spendKpis(rk) : ""}
   ${d.overdue.length ? `<div class="alert danger"><b>${d.overdue.length} conta(s) vencida(s):</b> ${d.overdue.map(t => `${esc(t.counterparty)} ${money(t.openCents)}`).join(" · ")}</div>` : ""}
@@ -875,6 +876,7 @@ async function pedidosPage() {
       ${me?.conductOnly ? "" : `<div><label>Para quem</label><select name="person">${personOptions(me?.personId ?? null)}</select></div>`}
       <div class="full"><button>Pedir autorização</button></div>
     </form></div>
+  ${me?.conductOnly ? await receiptCard() : ""}
   <div class="card"><h3>${judge ? "Meus pedidos" : "Seus pedidos"}</h3>${mine.length ? `<ul class="imp">${mine.map(row).join("")}</ul>` : `<p class="muted">Nenhum pedido ainda.</p>`}</div>
   ${others.length ? `<div class="card"><h3>Decididos recentemente</h3><ul class="imp">${others.map(row).join("")}</ul></div>` : ""}`;
 }
@@ -1229,6 +1231,7 @@ async function adminPage() {
     <div class="card">${log.length ? `<ul class="pays">${log.map(l => `<li><span><b>${esc(l.who)}</b> ${esc(l.action)} <b>${esc(l.what.toLowerCase())}</b>${l.label ? `: ${esc(l.label)}` : ""}${l.changed.length ? ` <span class="muted">(${l.changed.slice(0, 5).map(esc).join(", ")})</span>` : ""}</span><span class="muted">${dt(l.at)}</span></li>`).join("")}</ul>` : `<p class="muted">Nada encontrado com esses filtros.</p>`}</div>
     ${isRoot() ? `<form class="form card" id="ret-f"><div><label>Guardar o registro por (meses, 0 = sem limite)</label><input name="m" type="number" min="0" max="600" value="${ret.months}" required></div>
       <div><button class="ghost">Salvar</button></div><p class="muted full">Recomendado: 0 (sem limite). Se limitar, o que sair do banco fica só nas cópias mensais permanentes do backup.</p></form>` : ""}
+    ${isRoot() ? await tokenCard() : ""}
     <details class="card"><summary>Versão do banco (${st.migrations.length} atualizações aplicadas)</summary><ul class="pays">${st.migrations.map(m => `<li><span>${esc(m.name)}</span><span class="muted">${dt(m.appliedAt)}</span></li>`).join("")}</ul></details>`;
 }
 
@@ -1275,6 +1278,57 @@ async function pushOff() {
   const sub = await currentSub();
   if (sub) { await root("/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } }).catch(() => {}); await sub.unsubscribe(); }
   toast("Avisos desligados neste aparelho.");
+}
+
+/* ===================== Caixa de cupons ===================== */
+interface Receipt { id: string; status: "PENDING" | "READ" | "DISCARDED"; note: string | null; createdAt: string; uploadedByName: string; personName: string | null; accountLabel: string | null; uploadedBy: string; }
+/** Reduz a foto no próprio aparelho (lado maior 1600 px, JPEG): cabe no banco grátis e continua legível. */
+async function shrinkPhoto(file: File): Promise<string> {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+  const cv = document.createElement("canvas"); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+  cv.getContext("2d")!.drawImage(bmp, 0, 0, cv.width, cv.height);
+  const blob: Blob = await new Promise((ok, no) => cv.toBlob(b => (b ? ok(b) : no(new Error("foto"))), "image/jpeg", 0.8));
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+const RC_ST: Record<Receipt["status"], string> = { PENDING: `<span class="chip NO_VALUE">aguardando leitura</span>`, READ: `<span class="chip SETTLED">lido</span>`, DISCARDED: `<span class="chip">descartado</span>` };
+async function receiptCard() {
+  if (getEntity() !== "personal") return "";
+  const [list, src] = await Promise.all([api<Receipt[]>("/receipts").catch(() => [] as Receipt[]), api<PSource[]>("/requests/sources").catch(() => [] as PSource[])]);
+  const pending = list.filter(r => r.status === "PENDING");
+  const shown = list.slice(0, 6);
+  return `<div class="card"><div class="row spread"><h3 style="margin:0">Cupons</h3>${pending.length ? `<span class="chip NO_VALUE">${pending.length} aguardando</span>` : ""}</div>
+    <p class="muted">Tire a foto do cupom e diga como pagou. O responsável pede para ler tudo de uma vez e os gastos são lançados depois de conferidos.</p>
+    <form class="form" id="rc-f">
+      <div class="full"><label>Como pagou</label><select name="a"><option value="">Não sei / dinheiro</option>${src.map(s => `<option value="${s.id}">${srcLabel(s)}</option>`).join("")}</select></div>
+      <div class="full"><label>Observação (opcional)</label><input name="n" maxlength="200" placeholder="ex.: lanche da escola"></div>
+      <div class="full"><label class="btnlike rc-btn"><input type="file" accept="image/*" capture="environment" data-rcfile style="position:absolute;width:1px;height:1px;opacity:0">📷 Fotografar e enviar cupom</label></div>
+    </form>
+    ${shown.length ? `<ul class="imp">${shown.map(r => `<li><div class="row spread"><span>${br(r.createdAt.slice(0, 10))} · ${esc(r.personName ?? r.uploadedByName)}${r.accountLabel ? ` · ${esc(r.accountLabel)}` : ""}</span>${RC_ST[r.status]}</div>
+      ${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}
+      <div class="row"><a class="btnlike sm-like" href="/api/v1/personal/receipts/${r.id}/image" target="_blank" rel="noopener">Ver foto</a>
+        ${r.status === "PENDING" && (r.uploadedBy === me?.id || isGuardian()) ? `<button class="ghost sm" data-rcdel="${r.id}">Descartar</button>` : ""}</div></li>`).join("")}</ul>` : ""}
+  </div>`;
+}
+async function sendReceipt(file: File) {
+  const f = new FormData(document.getElementById("rc-f") as HTMLFormElement);
+  toast("Enviando o cupom…");
+  const image = await shrinkPhoto(file).catch(() => { throw new ApiError(422, "PHOTO", "Não consegui abrir essa foto. Tente tirar de novo."); });
+  await api("/receipts", { method: "POST", body: { image, accountId: str(f, "a") || null, note: str(f, "n") || null } });
+  toast("Cupom enviado. Pode jogar o papel fora.");
+}
+
+interface WToken { id: string; label: string; createdAt: string; expiresAt: string; revokedAt: string | null; lastUsedAt: string | null; }
+async function tokenCard() {
+  const toks = await root<WToken[]>("/admin/worker-tokens").catch(() => [] as WToken[]);
+  const active = toks.filter(t => !t.revokedAt && new Date(t.expiresAt) > new Date());
+  return `<div class="card"><h3>Chave do leitor de cupons</h3>
+    <p class="muted">Chave limitada que o Claude usa, numa conversa sua, para ler os cupons enviados. Só enxerga a caixa de cupons (nada de saldos ou dívidas) e não lança nada sozinha. Vence em 90 dias.</p>
+    ${active.length ? `<ul class="imp">${active.map(t => `<li><div class="row spread"><span>${esc(t.label)} · vence ${br(t.expiresAt.slice(0, 10))}${t.lastUsedAt ? ` · último uso ${br(t.lastUsedAt.slice(0, 10))}` : " · nunca usada"}</span>
+      <button class="danger sm" data-tokrevoke="${t.id}">Revogar</button></div></li>`).join("")}</ul>` : `<p class="muted">Nenhuma chave ativa.</p>`}
+    <div class="row"><button class="sm" data-toknew>Criar chave</button></div></div>`;
 }
 
 /* ===================== Importar extrato (OFX) ===================== */
@@ -1492,6 +1546,14 @@ view.addEventListener("click", async e => {
       toast(d.reqok ? "Aprovado e lançado." : "Recusado. A pessoa recebe o recado."); await render();
     }
     else if (d.print !== undefined) window.print();
+    else if (d.rcdel) { if (confirm("Descartar este cupom? Ele não será lido.")) { await api(`/receipts/${d.rcdel}/discard`, { method: "POST" }); toast("Cupom descartado."); await render(); } }
+    else if (d.toknew !== undefined) {
+      const t = await root<{ token: string; expiresAt: string }>("/admin/worker-tokens", { method: "POST", body: { label: "Leitor de cupons (Claude)", days: 90 } });
+      openDialog("Chave criada — aparece só agora", `<p class="full">Quando o Claude pedir, cole esta chave no <b>formulário seguro</b> que aparece na conversa (nunca no chat). Ela vence em ${br(t.expiresAt.slice(0, 10))}.</p>
+        <div class="full"><input readonly value="${esc(t.token)}" style="font-family:monospace"></div>
+        <p class="muted full">Perdeu? Revogue e crie outra.</p>`, "Fechei, já guardei", async () => {});
+    }
+    else if (d.tokrevoke) { if (confirm("Revogar esta chave? O leitor de cupons para de funcionar até você criar outra.")) { await root(`/admin/worker-tokens/${d.tokrevoke}`, { method: "DELETE" }); toast("Chave revogada."); await render(); } }
     else if (d.reqcancel) { await api(`/requests/${d.reqcancel}/cancel`, { method: "POST" }); toast("Pedido cancelado."); await render(); }
     else if (d.reqagain) { const r = (await api<PReq[]>("/requests")).find(x => x.id === d.reqagain); if (r) reqPrefill = { d: r.description, v: r.amountCents, c: r.category }; await render(); scrollTo(0, 0); }
     else if (d.review) { await api("/conduct/checks/review", { method: "POST", body: { personId: d.person, ruleId: d.review, day: d.day, approve: d.val === "true" } }); toast(d.val === "true" ? "Aprovado." : "Recusado: não conta na nota."); await render(); }
@@ -1547,6 +1609,7 @@ function srcOf(f: FormData): { accountId?: string; cardAccountId?: string } {
 }
 view.addEventListener("change", async e => {
   const t = e.target as HTMLInputElement;
+  if (t.matches("[data-rcfile]") && t.files?.[0]) { try { await sendReceipt(t.files[0]); await render(); } catch (err) { fail(err); } finally { t.value = ""; } return; }
   if (t.matches("[data-ofx]") && t.files?.[0]) { try { await importStatement(t.dataset.ofx!, t.files[0]); } catch (err) { fail(err); } finally { t.value = ""; } return; }
   if (t.matches("[data-importfile]") && t.files?.[0]) { try { await importFile(t.files[0]); } catch (err) { fail(err); } finally { t.value = ""; } }
 });
