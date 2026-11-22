@@ -819,3 +819,47 @@ describe("Fechamento do mês e aprovação de checks", () => {
     expect((await req("GET", `${P}/conduct/pending`)).json.filter((p: { personId: string }) => p.personId === pid)).toHaveLength(0);
   });
 });
+
+describe("Avisos no celular", () => {
+  it("avisa responsáveis no check pendente, a criança na aprovação, contas do dia no cron e limpa aparelho cancelado", async () => {
+    const { setSender } = await import("../src/push.js");
+    const sent: { endpoint: string; body: { title: string; body: string } }[] = [];
+    setSender(async (sub, payload) => { if (sub.endpoint.includes("cancelado")) throw Object.assign(new Error("gone"), { statusCode: 410 }); sent.push({ endpoint: sub.endpoint, body: JSON.parse(payload) }); });
+    const k1 = (await req("GET", "/api/v1/push/key")).json.publicKey;
+    expect(k1).toMatch(/^[A-Za-z0-9_-]{80,}$/);
+    expect((await req("GET", "/api/v1/push/key")).json.publicKey).toBe(k1); // chave estável
+    const sub = (name: string) => ({ endpoint: `https://push.example/${name}`, keys: { p256dh: "B".repeat(87), auth: "A".repeat(22) } });
+    expect((await req("POST", "/api/v1/push/subscribe", sub("pai"))).status).toBe(201);
+    await req("POST", "/api/v1/push/subscribe", sub("pai-cancelado"));
+
+    const pid = (await req("POST", `${P}/people`, { name: "Criança Aviso" })).json.id;
+    await req("POST", "/api/v1/admin/users", { email: "aviso@familia.test", name: "Aviso", personId: pid, conductOnly: true, password: "frase-longa-aviso-12" });
+    await db.query("UPDATE app_user SET must_change_password = false WHERE email = 'aviso@familia.test'");
+    const lr = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "aviso@familia.test", password: "frase-longa-aviso-12" }) });
+    const kid = (lr.headers.get("set-cookie") ?? "").split(";")[0]!;
+    expect((await req("POST", "/api/v1/push/subscribe", sub("crianca"), { cookie: kid })).status).toBe(201);
+
+    const rule = (await req("POST", `${P}/conduct/rules`, { kind: "HABIT", name: "Guardar brinquedos", assignees: [{ personId: pid }] })).json;
+    const day = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+    sent.length = 0;
+    await req("POST", `${P}/conduct/checks`, { personId: pid, ruleId: rule.id, day, checked: true }, { cookie: kid });
+    expect(sent.find(s => s.endpoint.endsWith("/pai"))?.body).toMatchObject({ title: "Criança Aviso marcou uma tarefa", body: "Guardar brinquedos — toque para aprovar." });
+    expect(sent.some(s => s.endpoint.endsWith("/crianca"))).toBe(false);
+    // aparelho cancelado (410) é removido
+    expect((await db.query("SELECT count(*)::int AS n FROM push_subscription WHERE endpoint LIKE '%cancelado'")).rows[0].n).toBe(0);
+
+    sent.length = 0;
+    await req("POST", `${P}/conduct/checks/review`, { personId: pid, ruleId: rule.id, day, approve: true });
+    expect(sent.map(s => s.endpoint)).toEqual(["https://push.example/crianca"]);
+    expect(sent[0]!.body.title).toBe("Tarefa aprovada ✓");
+
+    // cron: conta que vence hoje vira lembrete para os responsáveis
+    await req("POST", `${P}/titles`, { kind: "PAYABLE", nature: "EXPENSE", counterparty: "Conta de hoje", category: "OUTROS", amountCents: 12345, dueDate: day });
+    sent.length = 0;
+    const cron = await (await app.request("/api/v1/cron/recurrences", { headers: { authorization: "Bearer segredo-cron" } })).json();
+    expect(cron.pushed).toBeGreaterThanOrEqual(1);
+    expect(sent.find(s => s.endpoint.endsWith("/pai"))!.body.body).toContain("Conta de hoje");
+    // a criança não recebe aviso de contas
+    expect(sent.some(s => s.endpoint.endsWith("/crianca"))).toBe(false);
+  });
+});

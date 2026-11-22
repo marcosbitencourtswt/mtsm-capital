@@ -391,7 +391,7 @@ async function config() {
     api<Recurrence[]>("/recurrences"),
     api<{ id: string; paidOn: string; amountCents: number; warnings: string[]; counterparty: string }[]>("/warnings"),
   ]);
-  return `<div class="card"><h3>Verificação em duas etapas</h3>
+  return `${await pushCard()}<div class="card"><h3>Verificação em duas etapas</h3>
     ${me?.totpEnabled
       ? `<p><span class="chip SETTLED">Ativa</span> Ao entrar num aparelho novo, além da senha o sistema pede o código do app autenticador.</p>
          <div class="row"><button class="ghost sm" data-mfaoff>Desativar</button></div>`
@@ -545,6 +545,7 @@ async function combinadosPage() {
   const [b, rules, al] = await Promise.all([api<Board>(`/conduct/board?date=${cbDate}`), api<Rule[]>("/conduct/rules"), api<AllowanceResp>("/conduct/allowance")]);
   if (!cbView && me?.personId && b.rows.some(r => r.personId === me!.personId) && !isGuardian()) cbView = me.personId;
   if (me?.conductOnly && cbView !== "" && cbView !== me.personId) cbView = me.personId ?? "";
+  const pushTop = me?.conductOnly && !(await currentSub()) ? await pushCard() : "";
   const tabs = `<div class="person-tabs" role="tablist">
     <button role="tab" class="${cbView === "" ? "on" : ""}" data-cbperson="">Família</button>
     ${b.rows.filter(r => !me?.conductOnly || r.personId === me.personId).map(r => `<button role="tab" class="${cbView === r.personId ? "on" : ""}" data-cbperson="${r.personId}">${esc(r.name)}${r.personId === me?.personId ? " (eu)" : ""}</button>`).join("")}
@@ -552,7 +553,7 @@ async function combinadosPage() {
   if (cbView === "admin" && isAdmin()) return tabs + await combinadosAdmin(rules, al);
   if (isGuardian()) { pendingCache = await api<Pending[]>("/conduct/pending").catch(() => []); if (cbView === "") return tabs + pendingCard(pendingCache) + familyView(b, al); }
   const row = b.rows.find(r => r.personId === cbView);
-  return tabs + (row ? personView(b, row, al.people.find(a => a.personId === row.personId)) : familyView(b, al));
+  return pushTop + tabs + (row ? personView(b, row, al.people.find(a => a.personId === row.personId)) : familyView(b, al));
 }
 
 function weekNav(b: Board) {
@@ -1084,6 +1085,50 @@ async function adminPage() {
 }
 
 /* ===================== Sessão: login, senha, sair ===================== */
+/* ===================== Avisos no celular (Web Push) ===================== */
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent);
+const standalone = () => matchMedia("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+function b64ToBytes(b64: string) {
+  const s = atob((b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(s, ch => ch.charCodeAt(0));
+}
+async function currentSub() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.getRegistration();
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+/** Card "Avisos no celular": liga/desliga neste aparelho e testa. */
+async function pushCard() {
+  if (!pushSupported()) {
+    return `<div class="card"><h3>Avisos no celular</h3><p class="muted">${isIOS() && !standalone()
+      ? "No iPhone, os avisos só funcionam com o app instalado: Safari → Compartilhar → Adicionar à Tela de Início. Depois abra pelo ícone e volte aqui."
+      : "Este navegador não aceita avisos. Use o Chrome (Android/computador) ou o app instalado no iPhone."}</p></div>`;
+  }
+  const sub = await currentSub();
+  const denied = Notification.permission === "denied";
+  return `<div class="card"><h3>Avisos no celular</h3>
+    <p class="muted">${me?.conductOnly ? "Receba aqui quando uma tarefa sua for aprovada." : "Aprovações das crianças, contas que vencem hoje e amanhã e o lembrete do fechamento do mês."} Grátis, direto no aparelho.</p>
+    ${denied ? `<p class="neg">Os avisos estão bloqueados neste aparelho. Libere nas configurações do navegador/celular para este site e tente de novo.</p>` : ""}
+    <div class="row">${sub ? `<span class="chip SETTLED">ligados neste aparelho</span><button class="ghost sm" data-pushtest>Enviar teste</button><button class="ghost sm" data-pushoff>Desligar</button>`
+      : `<button class="sm" data-pushon ${denied ? "disabled" : ""}>Ligar avisos neste aparelho</button>`}</div></div>`;
+}
+async function pushOn() {
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { toast("Sem permissão, não dá para avisar. Libere nas configurações do aparelho.", true); return; }
+  const reg = await navigator.serviceWorker.ready;
+  const { publicKey } = await root<{ publicKey: string }>("/push/key");
+  const sub = (await reg.pushManager.getSubscription()) ?? await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(publicKey) });
+  await root("/push/subscribe", { method: "POST", body: sub.toJSON() });
+  await root("/push/test", { method: "POST" });
+  toast("Avisos ligados. Mandei um teste.");
+}
+async function pushOff() {
+  const sub = await currentSub();
+  if (sub) { await root("/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } }).catch(() => {}); await sub.unsubscribe(); }
+  toast("Avisos desligados neste aparelho.");
+}
+
 /* ===================== Importar cadastro ===================== */
 interface ImportRes { dryRun: boolean; created: number; rows: { index: number; status: "novo" | "ja_existe" | "erro"; type: string; label: string; owner: string; summary: string; error?: string }[]; }
 const IMPORT_TYPE: Record<string, string> = { CHECKING: "Conta", SAVINGS: "Poupança", INVESTMENT: "Investimento", CARD: "Cartão", LOAN: "Dívida", CASH: "Dinheiro" };
@@ -1276,6 +1321,9 @@ view.addEventListener("click", async e => {
     else if (d.resetuser) resetUser(d.resetuser);
     else if (d.reset2fa) { if (confirm("Desligar a verificação em duas etapas desta pessoa? Use quando ela perdeu o celular. Ela vai entrar só com a senha e poderá ativar de novo.")) { await root(`/admin/users/${d.reset2fa}/reset-2fa`, { method: "POST" }); toast("Verificação em duas etapas desligada."); await render(); } }
     else if (d.mfaon !== undefined) await mfaSetup();
+    else if (d.pushon !== undefined) { await pushOn(); await render(); }
+    else if (d.pushoff !== undefined) { await pushOff(); await render(); }
+    else if (d.pushtest !== undefined) { const r = await root<{ sent: number }>("/push/test", { method: "POST" }); toast(r.sent ? "Teste enviado. Deve chegar em segundos." : "Nenhum aparelho recebeu. Desligue e ligue de novo.", !r.sent); }
     else if (d.mfaoff !== undefined) mfaDisable();
     else if (d.toggleuser) { await root(`/admin/users/${d.toggleuser}`, { method: "PATCH", body: { active: d.active !== "true" } }); toast(d.active === "true" ? "Usuário desativado." : "Usuário reativado."); await render(); }
     else if (d.editperson) editPerson(d.editperson);

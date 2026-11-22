@@ -5,6 +5,7 @@ import * as auth from "./auth.js";
 import * as conduct from "./conduct.js";
 import * as admin from "./admin.js";
 import * as accounts from "./accounts.js";
+import * as push from "./push.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import { actorStore, type Db } from "./db.js";
@@ -150,13 +151,35 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     for (const e of ["PERSONAL", "BYTE4TECH"] as const) for (const m of [cur, addMonths(cur, 1).slice(0, 7)]) out.push({ entity: e, ...(await svc.generateRecurrences(db, e, m)) });
     await conduct.materializeMisses(db); // faltas de hábito do dia anterior
     const pruned = await admin.pruneAudit(db, await admin.getRetention(db)); // retenção do registro de alterações
-    return c.json({ recurrences: out, auditPruned: pruned });
+    const pushed = await safePush(() => dailyReminders());
+    return c.json({ recurrences: out, auditPruned: pruned, pushed });
   });
 
   const CONDUCT_ONLY_ALLOWED: [string, RegExp][] = [
     ["GET", /^\/api\/v1\/auth\/me$/], ["POST", /^\/api\/v1\/auth\/password$/], ["POST", /^\/api\/v1\/auth\/2fa\/(setup|enable|disable)$/],
     ["GET", /^\/api\/v1\/personal\/people$/], ["GET", /^\/api\/v1\/personal\/conduct\/(board|rules|allowance)$/], ["POST", /^\/api\/v1\/personal\/conduct\/checks$/],
+    ["GET", /^\/api\/v1\/push\/(key|status)$/], ["POST", /^\/api\/v1\/push\/(subscribe|unsubscribe|test)$/],
   ];
+  /** Aviso nunca derruba a operação: erro vira log e segue. */
+  async function safePush(fn: () => Promise<number>): Promise<number> {
+    try { return await fn(); } catch (e) { console.error(JSON.stringify({ level: "warn", msg: "aviso não enviado", err: (e as Error).message })); return 0; }
+  }
+  /** Lembretes da manhã para quem cuida da casa: contas de hoje/amanhã, atrasadas e fechamento do mês. */
+  async function dailyReminders(): Promise<number> {
+    const today = todaySP(), tomorrow = new Date(Date.parse(`${today}T12:00:00Z`) + 864e5).toISOString().slice(0, 10);
+    const open = (await svc.listTitles(db, "PERSONAL", { status: "open" }, today)).filter(t => t.kind === "PAYABLE" && t.openCents > 0);
+    const sum = (l: typeof open) => (l.reduce((s, t) => s + t.openCents, 0) / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+    const due0 = open.filter(t => t.dueDate === today), due1 = open.filter(t => t.dueDate === tomorrow), late = open.filter(t => t.dueDate && t.dueDate < today);
+    const lines: string[] = [];
+    if (due0.length) lines.push(`Hoje: ${due0.slice(0, 3).map(t => t.counterparty).join(", ")}${due0.length > 3 ? ` +${due0.length - 3}` : ""} (${sum(due0)})`);
+    if (due1.length) lines.push(`Amanhã: ${due1.length} conta(s), ${sum(due1)}`);
+    if (late.length) lines.push(`Atrasadas: ${late.length} (${sum(late)})`);
+    const to = await push.guardians(db);
+    let n = 0;
+    if (lines.length) n += await push.notify(db, to, { title: "Contas da casa", body: lines.join(" · "), url: "/#pagar", tag: "contas" });
+    if (today.endsWith("-03")) n += await push.notify(db, to, { title: "O mês anterior fecha dia 5", body: "Lance até dia 4 o que faltou. Depois, só o root corrige.", url: "/#painel", tag: "fechamento" });
+    return n;
+  }
   /* ---- Login ---- */
   const clientIp = (c: Context) => (c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "").split(",")[0]!.trim() || undefined;
   const cookieOpts = (c: Context) => ({ httpOnly: true, sameSite: "Lax" as const, path: "/",
@@ -212,6 +235,16 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.post("/auth/2fa/enable", async c => c.json(await auth.totpEnable(db, c.get("user").id, (await body(c, z.object({ code: z.string().max(20) }).strict())).code)));
   v1.post("/auth/2fa/disable", async c => { await auth.totpDisable(db, c.get("user").id, (await body(c, z.object({ password: z.string().max(200) }).strict())).password); return c.body(null, 204); });
   v1.post("/admin/users/:id/reset-2fa", async c => { requireAdmin(c); await auth.adminResetTotp(db, param(c, "id"), c.get("user")); return c.body(null, 204); });
+  v1.get("/push/key", async c => c.json({ publicKey: (await push.keys(db)).publicKey }));
+  v1.get("/push/status", async c => c.json({ devices: await push.devices(db, c.get("user").id) }));
+  v1.post("/push/subscribe", async c => {
+    const i = await body(c, z.object({ endpoint: z.url().max(1000), keys: z.object({ p256dh: z.string().min(10).max(200), auth: z.string().min(8).max(100) }).strict(),
+      expirationTime: z.number().nullable().optional() }).strict());
+    await push.subscribe(db, c.get("user").id, i, c.req.header("user-agent"));
+    return c.json({ devices: await push.devices(db, c.get("user").id) }, 201);
+  });
+  v1.post("/push/unsubscribe", async c => { await push.unsubscribe(db, c.get("user").id, (await body(c, z.object({ endpoint: z.string().max(1000) }).strict())).endpoint); return c.body(null, 204); });
+  v1.post("/push/test", async c => c.json({ sent: await push.notify(db, [c.get("user").id], { title: "MTSM Capital", body: "Avisos ligados neste aparelho. ✓", url: "/", tag: "teste" }) }));
   v1.get("/admin/users", async c => { requireAdmin(c); return c.json(await auth.listUsers(db)); });
   v1.post("/admin/users", async c => { requireAdmin(c); return c.json(await auth.createUser(db, await body(c, userCreate), c.get("user")), 201); });
   v1.patch("/admin/users/:id", async c => { requireAdmin(c); return c.json(await auth.updateUser(db, param(c, "id"), await body(c, userPatch), c.get("user"))); });
@@ -371,8 +404,26 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     return c.json(await conduct.board(db, d));
   });
   v1.get("/:entity/conduct/pending", async c => { personal(c); return c.json(await conduct.pendingChecks(db)); });
-  v1.post("/:entity/conduct/checks/review", async c => c.json(await conduct.reviewCheck(db, personal(c), await body(c, checkInput.omit({ checked: true }).extend({ approve: z.boolean() }).strict()))));
-  v1.post("/:entity/conduct/checks", async c => c.json(await conduct.setCheck(db, personal(c), await body(c, checkInput))));
+  v1.post("/:entity/conduct/checks/review", async c => {
+    const i = await body(c, checkInput.omit({ checked: true }).extend({ approve: z.boolean() }).strict());
+    const r = await conduct.reviewCheck(db, personal(c), i);
+    await safePush(async () => {
+      const task = (await db.query("SELECT name FROM conduct_rule WHERE id = $1", [i.ruleId])).rows[0]?.name ?? "Tarefa";
+      return push.notify(db, await push.userOfPerson(db, i.personId), i.approve
+        ? { title: "Tarefa aprovada ✓", body: `${task} já conta na sua nota.`, url: "/#combinados", tag: "revisao" }
+        : { title: "Tarefa não aprovada", body: `${task} não foi aprovada. Fale com um responsável.`, url: "/#combinados", tag: "revisao" });
+    });
+    return c.json(r);
+  });
+  v1.post("/:entity/conduct/checks", async c => {
+    const i = await body(c, checkInput);
+    const r = await conduct.setCheck(db, personal(c), i);
+    if ("pending" in r && r.pending) await safePush(async () => {
+      const n = (await db.query("SELECT p.name AS who, r.name AS task FROM person p, conduct_rule r WHERE p.id = $1 AND r.id = $2", [i.personId, i.ruleId])).rows[0];
+      return push.notify(db, await push.guardians(db), { title: `${n?.who ?? "Alguém"} marcou uma tarefa`, body: `${n?.task ?? "Tarefa"} — toque para aprovar.`, url: "/#painel", tag: "aprovar" });
+    });
+    return c.json(r);
+  });
   v1.post("/:entity/conduct/infractions", async c => c.json(await conduct.addInfraction(db, personal(c), await body(c, infractionInput)), 201));
   v1.post("/:entity/conduct/settle", async c => c.json(await conduct.settle(db, personal(c), await body(c, settleInput)), 201));
   v1.post("/:entity/conduct/sporadic", async c => c.json(await conduct.setSporadic(db, personal(c), await body(c, sporadicInput))));
