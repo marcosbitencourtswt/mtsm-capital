@@ -108,12 +108,25 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
     fontSrc: ["'self'", "https://fonts.gstatic.com"], imgSrc: ["'self'", "data:"], connectSrc: ["'self'"], frameAncestors: ["'none'"] } }));
 
+  /** Erro interno avisa o root no celular (no máximo 1 a cada 10 min por instância; só a rota, sem dados). */
+  let lastAlert = 0;
+  const alertRoot = (where: string) => {
+    if (Date.now() - lastAlert < 10 * 60_000) return;
+    lastAlert = Date.now();
+    void (async () => {
+      try {
+        const roots = (await db.query("SELECT id FROM app_user WHERE is_root AND active")).rows.map(r => r.id);
+        await push.notify(db, roots, { title: "Erro no sistema", body: `Falha em ${where}. Veja os logs da Vercel.`, url: "/#admin", tag: "erro" });
+      } catch { /* aviso de erro nunca gera outro erro */ }
+    })();
+  };
   app.onError((err, c) => {
     if (err instanceof AppError) return c.json({ error: { code: err.code, message: err.message, details: err.details } }, err.status);
     const mapped = svc.pgToAppError(err);
     if (mapped instanceof AppError) return c.json({ error: { code: mapped.code, message: mapped.message } }, mapped.status);
     // Log estruturado sem dados do corpo (podem conter dados pessoais).
     console.error(JSON.stringify({ level: "error", path: c.req.path, method: c.req.method, msg: (err as Error).message }));
+    alertRoot(`${c.req.method} ${c.req.path.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/gi, ":id")}`);
     // Banco fora do ar (comum no WSL depois de reiniciar): mensagem que diz o que fazer.
     const code = (err as { code?: string }).code;
     if (code === "ECONNREFUSED" || code === "57P03" || code === "ETIMEDOUT")
