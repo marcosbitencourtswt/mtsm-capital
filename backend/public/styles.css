@@ -317,3 +317,4 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
 .bar.budget i { background: var(--success); }
 .bar.budget.warn i { background: var(--warning); }
 .bar.budget.over i { background: var(--danger); }
+@media (max-width: 699px) { .pending-card .st-grid { grid-template-columns: 1fr; } }

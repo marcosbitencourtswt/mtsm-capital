@@ -8,6 +8,7 @@ import * as accounts from "./accounts.js";
 import * as push from "./push.js";
 import * as statement from "./statement.js";
 import * as budget from "./budget.js";
+import * as requests from "./requests.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import { actorStore, type Db } from "./db.js";
@@ -173,6 +174,7 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   const CONDUCT_ONLY_ALLOWED: [string, RegExp][] = [
     ["GET", /^\/api\/v1\/auth\/me$/], ["POST", /^\/api\/v1\/auth\/password$/], ["POST", /^\/api\/v1\/auth\/2fa\/(setup|enable|disable)$/],
     ["GET", /^\/api\/v1\/personal\/people$/], ["GET", /^\/api\/v1\/personal\/conduct\/(board|rules|allowance)$/], ["POST", /^\/api\/v1\/personal\/conduct\/checks$/],
+    ["GET", /^\/api\/v1\/personal\/requests(\/sources)?$/], ["POST", /^\/api\/v1\/personal\/requests$/], ["POST", /^\/api\/v1\/personal\/requests\/[0-9a-f-]{36}\/cancel$/],
     ["GET", /^\/api\/v1\/push\/(key|status)$/], ["POST", /^\/api\/v1\/push\/(subscribe|unsubscribe|test)$/],
   ];
   /** Aviso nunca derruba a operação: erro vira log e segue. */
@@ -417,6 +419,26 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     for (const [m, cats] of byMonth) await budgetAlerts(c.get("entity"), cats, `${m}-28`);
     return c.json(r);
   });
+  // Pedidos de compra com autorização
+  v1.get("/:entity/requests/sources", async c => c.json(await requests.sources(db, c.get("entity"))));
+  v1.get("/:entity/requests", async c => c.json(await requests.list(db, c.get("entity"), c.get("user"))));
+  v1.post("/:entity/requests", async c => {
+    const i = await body(c, z.object({ description: text(120), amountCents: positiveCents, category: z.string().trim().max(40).optional(), accountId: uuid.nullable().optional(),
+      forPersonId: uuid.nullable().optional() }).strict());
+    const u = c.get("user"), r = await requests.create(db, c.get("entity"), u, i);
+    await safePush(async () => push.notify(db, await requests.reviewersFor(db, u.id), { title: `Pedido de ${u.name}`,
+      body: `${r.description} · ${(r.amountCents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}${r.accountLabel ? ` · pelo ${r.accountLabel}` : ""}`, url: "/#pedidos", tag: "pedido" }));
+    return c.json(r, 201);
+  });
+  v1.post("/:entity/requests/:id/review", async c => {
+    const i = await body(c, z.object({ approve: z.boolean(), accountId: uuid.nullable().optional(), note: z.string().trim().max(200).nullable().optional(), date: isoDate.optional() }).strict());
+    const r = await requests.review(db, c.get("entity"), c.get("user"), param(c, "id"), i);
+    await safePush(async () => push.notify(db, [r.requestedBy], r.status === "APPROVED"
+      ? { title: "Pedido aprovado ✓", body: `${r.description}${r.paidAccountLabel ? ` · pelo ${r.paidAccountLabel}` : ""}${r.reviewNote ? ` — ${r.reviewNote}` : ""}`, url: "/#pedidos", tag: "pedido" }
+      : { title: "Pedido não aprovado", body: `${r.description} — ${r.reviewNote}`, url: "/#pedidos", tag: "pedido" }));
+    return c.json(r);
+  });
+  v1.post("/:entity/requests/:id/cancel", async c => c.json(await requests.cancel(db, c.get("entity"), c.get("user"), param(c, "id"))));
   // Orçamento por categoria (Marcos e Thaís definem; todos veem)
   v1.get("/:entity/budget", async c => c.json(await budget.list(db, c.get("entity"), asOf(c))));
   v1.put("/:entity/budget/:category", async c => {

@@ -948,3 +948,55 @@ describe("Orçamento por categoria", () => {
     expect((await req("GET", `${P}/budget`)).json.items.some((i: { category: string }) => i.category === "DELIVERY")).toBe(false);
   });
 });
+
+describe("Pedidos de compra", () => {
+  it("criança pede, responsável troca a conta e aprova (vira gasto dela); recusa exige motivo; quem pede não aprova", async () => {
+    const { setSender } = await import("../src/push.js");
+    const sent: { to: string; title: string }[] = [];
+    setSender(async (sub, payload) => { sent.push({ to: sub.endpoint, title: JSON.parse(payload).title }); });
+    const login = async (email: string, pw: string) => ((await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password: pw }) })).headers.get("set-cookie") ?? "").split(";")[0]!;
+    const pid = (await req("POST", `${P}/people`, { name: "Criança Pedido" })).json.id;
+    await req("POST", "/api/v1/admin/users", { email: "pedido@familia.test", name: "Pedido", personId: pid, conductOnly: true, password: "frase-longa-pedido-12" });
+    await db.query("UPDATE app_user SET must_change_password = false WHERE email = 'pedido@familia.test'");
+    const kid = await login("pedido@familia.test", "frase-longa-pedido-12");
+    await req("POST", "/api/v1/push/subscribe", { endpoint: "https://push.example/pedido-pai", keys: { p256dh: "B".repeat(87), auth: "A".repeat(22) } });
+    await req("POST", "/api/v1/push/subscribe", { endpoint: "https://push.example/pedido-kid", keys: { p256dh: "B".repeat(87), auth: "A".repeat(22) } }, { cookie: kid });
+    const nu = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta pedido A", institution: "Banco PA", openingBalanceCents: 0 })).json;
+    const inter = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta pedido B", institution: "Banco PB", openingBalanceCents: 100000 })).json;
+
+    // a criança vê as opções (só nomes) e pede pelo banco A
+    const src = (await req("GET", `${P}/requests/sources`, undefined, { cookie: kid })).json;
+    expect(src.some((s: { id: string }) => s.id === nu.id)).toBe(true);
+    expect(src[0].balanceCents).toBeUndefined();
+    sent.length = 0;
+    const r1 = (await req("POST", `${P}/requests`, { description: "Caderno", amountCents: 3500, category: "EDUCACAO", accountId: nu.id }, { cookie: kid })).json;
+    expect(r1).toMatchObject({ status: "PENDING", forPersonId: pid, accountId: nu.id });
+    expect(sent.some(s => s.to.endsWith("pedido-pai") && s.title === "Pedido de Pedido")).toBe(true);
+    expect(sent.some(s => s.to.endsWith("pedido-kid"))).toBe(false);
+    // a criança não aprova
+    expect((await req("POST", `${P}/requests/${r1.id}/review`, { approve: true }, { cookie: kid })).status).toBe(403);
+    // recusar sem motivo não pode
+    expect((await req("POST", `${P}/requests/${r1.id}/review`, { approve: false })).json.error.code).toBe("NOTE_REQUIRED");
+    sent.length = 0;
+    const rej = (await req("POST", `${P}/requests/${r1.id}/review`, { approve: false, note: "Sem saldo no A, peça pelo B" })).json;
+    expect(rej).toMatchObject({ status: "REJECTED", reviewNote: "Sem saldo no A, peça pelo B" });
+    expect(sent.find(s => s.to.endsWith("pedido-kid"))?.title).toBe("Pedido não aprovado");
+
+    // pede de novo; o responsável aprova trocando para o banco B
+    const r2 = (await req("POST", `${P}/requests`, { description: "Caderno", amountCents: 3500, category: "EDUCACAO", accountId: nu.id }, { cookie: kid })).json;
+    const ok = (await req("POST", `${P}/requests/${r2.id}/review`, { approve: true, accountId: inter.id })).json;
+    expect(ok).toMatchObject({ status: "APPROVED", paidAccountId: inter.id });
+    expect((await req("POST", `${P}/requests/${r2.id}/review`, { approve: true, accountId: inter.id })).status).toBe(409); // não aprova duas vezes
+    const bal = (await req("GET", `${P}/accounts`)).json.find((a: { id: string }) => a.id === inter.id).balanceCents;
+    expect(bal).toBe(100000 - 3500);
+    const t = (await req("GET", `${P}/titles?person=${pid}`)).json.find((x: { counterparty: string }) => x.counterparty === "Pedido: Caderno");
+    expect(t).toMatchObject({ amountCents: 3500, category: "EDUCACAO", personId: pid });
+
+    // a criança só vê os próprios pedidos; o responsável vê todos
+    expect((await req("GET", `${P}/requests`, undefined, { cookie: kid })).json.every((x: { requestedBy: string; forPersonId: string }) => x.requestedBy !== undefined && x.forPersonId === pid)).toBe(true);
+    // quem pede não aprova o próprio pedido
+    const own = (await req("POST", `${P}/requests`, { description: "Fone", amountCents: 9900, accountId: inter.id })).json;
+    expect((await req("POST", `${P}/requests/${own.id}/review`, { approve: true })).json.error.code).toBe("OWN_REQUEST");
+    expect((await req("POST", `${P}/requests/${own.id}/cancel`)).json.status).toBe("CANCELED");
+  });
+});

@@ -61,17 +61,17 @@ function centsOf(f: FormData, k: string, required = true): number | null {
 }
 
 /* ===================== Roteamento ===================== */
-type Tab = "painel" | "admin" | "bancos" | "combinados" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
+type Tab = "painel" | "admin" | "bancos" | "combinados" | "pedidos" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
 let tab: Tab = (location.hash.slice(1) as Tab) || "painel";
-const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, bancos: bancosPage, combinados: combinadosPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
-const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", bancos: "Bancos e dívidas", combinados: "Combinados", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
+const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, bancos: bancosPage, combinados: combinadosPage, pedidos: pedidosPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
+const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", bancos: "Bancos e dívidas", combinados: "Combinados", pedidos: "Pedidos de compra", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
 const side = $("#side"), scrim = $("#scrim");
 const menu = (open: boolean) => { side.classList.toggle("open", open); scrim.classList.toggle("open", open); };
 $("#menu-btn").addEventListener("click", () => menu(true));
 scrim.addEventListener("click", () => menu(false));
 
 async function render() {
-  if (me?.conductOnly && tab !== "combinados") tab = "combinados";
+  if (me?.conductOnly && tab !== "combinados" && tab !== "pedidos") tab = "combinados";
   document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   $("#page-title").textContent = TITLES[tab]; document.title = `${TITLES[tab]} · NOFINANCE`;
   try { await loadPeople(); view.innerHTML = await renderers[tab](); }
@@ -99,6 +99,7 @@ async function painel() {
   const ds = personal ? await api<DebtSummary>("/debts/summary").catch(() => null) : null;
   pendingCache = personal && isGuardian() ? await api<Pending[]>("/conduct/pending").catch(() => []) : [];
   budgetCache = await api<Budget>("/budget").catch(() => null);
+  const waitingReq = personal && isGuardian() ? (await api<PReq[]>("/requests").catch(() => [] as PReq[])).filter(r => r.status === "PENDING" && r.requestedBy !== me?.id) : [];
   const live = accs.filter(a => a.active);
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
   const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
@@ -113,6 +114,8 @@ async function painel() {
     ${kpi("Saldo previsto", d.projectedBalanceCents, d.projectedBalanceCents < 0 ? "neg" : "", true)}
     ${kpi("A pagar", d.payableOpenCents)}${kpi("A receber", d.receivableOpenCents)}${kpi("Empréstimos", d.debtOpenCents)}
   </div>
+  ${waitingReq.length ? `<div class="alert"><b>${waitingReq.length} pedido(s) de compra aguardando você:</b> ${waitingReq.slice(0, 3).map(r => `${esc(r.requestedByName)} · ${esc(r.description)} ${money(r.amountCents)}`).join(" · ")}
+    <button class="sm" data-goto="pedidos">Decidir</button></div>` : ""}
   ${pendingCard(pendingCache)}
   ${ds ? debtBoard(ds) : ""}
   ${budgetCard(budgetCache)}
@@ -756,6 +759,51 @@ let bkStrategy: "juros" | "rapidas" | "nome" = "juros";
 const STRATEGY = { juros: ["Menos juros", "Atrasados e depois os juros mais altos. Economiza mais dinheiro."],
   rapidas: ["Vitórias rápidas", "Menores primeiro. Fecha dívidas rápido e dá fôlego."],
   nome: ["Limpar o nome", "Negativadas e as atrasadas há mais tempo primeiro."] } as const;
+/* ===================== Pedidos de compra ===================== */
+interface PReq { id: string; description: string; amountCents: number; category: string; status: "PENDING" | "APPROVED" | "REJECTED" | "CANCELED"; reviewNote: string | null;
+  createdAt: string; reviewedAt: string | null; requestedBy: string; requestedByName: string; forPersonId: string | null; forPersonName: string | null;
+  accountId: string | null; accountLabel: string | null; paidAccountId: string | null; paidAccountLabel: string | null; reviewedByName: string | null; }
+interface PSource { id: string; type: string; label: string; ownerName: string | null; }
+const REQ_ST: Record<PReq["status"], string> = { PENDING: `<span class="chip NO_VALUE">aguardando</span>`, APPROVED: `<span class="chip SETTLED">aprovado</span>`,
+  REJECTED: `<span class="chip OVERDUE">não aprovado</span>`, CANCELED: `<span class="chip">cancelado</span>` };
+let reqPrefill: { d?: string; v?: number; c?: string } = {};
+const srcLabel = (s: PSource) => `${s.type === "CARD" ? "Cartão " : ""}${esc(s.label)}${s.ownerName ? ` (${esc(s.ownerName)})` : ""}`;
+async function pedidosPage() {
+  if (getEntity() !== "personal") return `<div class="empty">Pedidos de compra são da família (entidade Pessoal).</div>`;
+  const [list, src] = await Promise.all([api<PReq[]>("/requests"), api<PSource[]>("/requests/sources")]);
+  const judge = isGuardian() && !me?.conductOnly;
+  const toDecide = judge ? list.filter(r => r.status === "PENDING" && r.requestedBy !== me?.id) : [];
+  const mine = list.filter(r => r.requestedBy === me?.id || !judge);
+  const others = judge ? list.filter(r => r.requestedBy !== me?.id && r.status !== "PENDING").slice(0, 20) : [];
+  const opts = (sel: string | null) => `<option value="">Escolha de onde sai</option>${src.map(s => `<option value="${s.id}" ${s.id === sel ? "selected" : ""}>${srcLabel(s)}</option>`).join("")}`;
+  const row = (r: PReq) => `<li><div class="row spread"><span><b>${esc(r.description)}</b> · ${money(r.amountCents)}</span>${REQ_ST[r.status]}</div>
+    <div class="muted">${esc(r.requestedByName)}${r.forPersonName && r.forPersonName !== r.requestedByName ? ` para ${esc(r.forPersonName)}` : ""} · ${br(r.createdAt.slice(0, 10))}
+      ${r.accountLabel ? ` · pediu pelo ${esc(r.accountLabel)}` : ""}${r.paidAccountLabel && r.status === "APPROVED" ? ` · saiu do ${esc(r.paidAccountLabel)}` : ""}</div>
+    ${r.reviewNote ? `<div>${r.status === "REJECTED" ? "Motivo" : "Recado"}: <b>${esc(r.reviewNote)}</b>${r.reviewedByName ? ` <span class="muted">— ${esc(r.reviewedByName)}</span>` : ""}</div>` : ""}
+    ${r.requestedBy === me?.id && r.status === "PENDING" ? `<div class="row"><button class="ghost sm" data-reqcancel="${r.id}">Cancelar pedido</button></div>` : ""}
+    ${r.requestedBy === me?.id && r.status === "REJECTED" ? `<div class="row"><button class="ghost sm" data-reqagain="${r.id}">Pedir de novo</button></div>` : ""}</li>`;
+  const decide = (r: PReq) => `<li><div><b>${esc(r.requestedByName)}</b>${r.forPersonName && r.forPersonName !== r.requestedByName ? ` (para ${esc(r.forPersonName)})` : ""} pede:
+      <b>${esc(r.description)}</b> · <b>${money(r.amountCents)}</b> <span class="muted">· ${esc(r.category)} · ${br(r.createdAt.slice(0, 10))}</span></div>
+    <div class="st-grid"><select id="racc-${r.id}" aria-label="De onde sai">${opts(r.accountId)}</select><input id="rnote-${r.id}" placeholder="Recado (obrigatório se recusar)" maxlength="200"></div>
+    <div class="row"><button class="sm" data-reqok="${r.id}">Aprovar e lançar</button><button class="ghost sm" data-reqno="${r.id}">Recusar</button></div></li>`;
+  const p = reqPrefill; reqPrefill = {};
+  return `<h2>Pedidos de compra</h2>
+  ${toDecide.length ? `<div class="card pending-card"><h3>Aguardando sua decisão (${toDecide.length})</h3><ul class="imp">${toDecide.map(decide).join("")}</ul>
+    <p class="muted">Aprovar lança o gasto na conta escolhida, em nome de quem vai usar. Sem saldo onde pediram? Troque a conta ou recuse com um recado.</p></div>` : ""}
+  <div class="card"><h3>Pedir autorização</h3>
+    <form class="form" id="req-f">
+      <div class="full"><label>O que vai comprar</label><input name="d" required maxlength="120" placeholder="ex.: tênis da escola" value="${esc(p.d ?? "")}"></div>
+      <div><label>Quanto (R$)</label><input name="v" inputmode="decimal" required placeholder="0,00" value="${p.v ? moneyInput(p.v) : ""}"></div>
+      <div><label>Categoria</label><select name="c">${catOptions(p.c ?? "OUTROS")}</select></div>
+      <div class="full"><label>De onde você sugere sair</label><select name="a">${opts(null)}</select></div>
+      ${me?.conductOnly ? "" : `<div><label>Para quem</label><select name="person">${personOptions(me?.personId ?? null)}</select></div>`}
+      <div class="full"><button>Pedir autorização</button></div>
+    </form></div>
+  <div class="card"><h3>${judge ? "Meus pedidos" : "Seus pedidos"}</h3>${mine.length ? `<ul class="imp">${mine.map(row).join("")}</ul>` : `<p class="muted">Nenhum pedido ainda.</p>`}</div>
+  ${others.length ? `<div class="card"><h3>Decididos recentemente</h3><ul class="imp">${others.map(row).join("")}</ul></div>` : ""}`;
+}
+
+
 /* ===================== Orçamento ===================== */
 interface Budget { month: string; monthElapsedPct: number; items: { category: string; limitCents: number; spentCents: number; leftCents: number; pct: number }[]; }
 const SPEND_CATS = CATEGORIES.filter(c => !["RENDA", "VENDAS", "SERVICOS", "DIVIDA", "CARTAO"].includes(c));
@@ -1265,8 +1313,8 @@ function renderMe() {
   entSel.hidden = !isAdmin();
   $("#tab-admin").hidden = !isAdmin();
   const conly = !!me?.conductOnly;
-  document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => { if (b.id !== "tab-admin") b.hidden = conly && b.dataset.tab !== "combinados"; });
-  if (conly) { tab = "combinados"; if (location.hash !== "#combinados") history.replaceState(null, "", "#combinados"); }
+  document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => { if (b.id !== "tab-admin") b.hidden = conly && b.dataset.tab !== "combinados" && b.dataset.tab !== "pedidos"; });
+  if (conly && tab !== "pedidos") { tab = "combinados"; if (location.hash !== "#combinados") history.replaceState(null, "", "#combinados"); }
   if (!isAdmin() && tab === "admin") tab = "painel";
   if (!isAdmin() && getEntity() !== "personal") { setEntity("personal"); entSel.value = "personal"; }
 }
@@ -1357,6 +1405,16 @@ view.addEventListener("click", async e => {
     else if (d.newrec !== undefined) newRec();
     else if (d.newperson !== undefined) newPerson();
     else if (d.goto) { if (d.bkowner !== undefined) bkOwner = d.bkowner; tab = d.goto as Tab; history.pushState(null, "", `#${tab}`); scrollTo(0, 0); await render(); }
+    else if (d.reqok || d.reqno) {
+      const id = (d.reqok ?? d.reqno)!, acc = (document.getElementById(`racc-${id}`) as HTMLSelectElement | null)?.value || null;
+      const note = (document.getElementById(`rnote-${id}`) as HTMLInputElement | null)?.value.trim() || null;
+      if (d.reqno && !note) { toast("Escreva o motivo no recado (ex.: sem saldo no Nubank, peça pelo Inter).", true); return; }
+      if (d.reqok && !acc) { toast("Escolha de onde sai o dinheiro.", true); return; }
+      await api(`/requests/${id}/review`, { method: "POST", body: { approve: !!d.reqok, accountId: acc, note } });
+      toast(d.reqok ? "Aprovado e lançado." : "Recusado. A pessoa recebe o recado."); await render();
+    }
+    else if (d.reqcancel) { await api(`/requests/${d.reqcancel}/cancel`, { method: "POST" }); toast("Pedido cancelado."); await render(); }
+    else if (d.reqagain) { const r = (await api<PReq[]>("/requests")).find(x => x.id === d.reqagain); if (r) reqPrefill = { d: r.description, v: r.amountCents, c: r.category }; await render(); scrollTo(0, 0); }
     else if (d.review) { await api("/conduct/checks/review", { method: "POST", body: { personId: d.person, ruleId: d.review, day: d.day, approve: d.val === "true" } }); toast(d.val === "true" ? "Aprovado." : "Recusado: não conta na nota."); await render(); }
     else if (d.reviewall !== undefined) { for (const p of pendingCache) await api("/conduct/checks/review", { method: "POST", body: { personId: p.personId, ruleId: p.ruleId, day: p.day, approve: true } }); toast(`${pendingCache.length} aprovados.`); await render(); }
     else if (d.check) { await api("/conduct/checks", { method: "POST", body: { personId: d.person, ruleId: d.check, day: d.day, checked: d.val === "true" } }); await render(); }
@@ -1429,6 +1487,12 @@ view.addEventListener("submit", async e => {
       if (str(f, "from") === str(f, "to")) { toast("Escolha contas diferentes em De e Para.", true); return; }
       await api("/transfers", { method: "POST", body: { fromAccountId: str(f, "from"), toAccountId: str(f, "to"), amountCents: centsOf(f, "v"), day: str(f, "dt") || undefined } });
       toast("Transferência registrada."); await render();
+    } else if (form.id === "req-f") {
+      const f = new FormData(form);
+      const body: Record<string, unknown> = { description: str(f, "d"), amountCents: centsOf(f, "v"), category: str(f, "c") || undefined, accountId: str(f, "a") || null };
+      if (f.has("person")) body.forPersonId = str(f, "person") || null;
+      await api("/requests", { method: "POST", body });
+      toast("Pedido enviado. Você recebe a resposta aqui (e no celular, se os avisos estiverem ligados)."); await render();
     } else if (form.id === "budget-f") {
       const f = new FormData(form), cur = await api<Budget>("/budget"), old = new Map(cur.items.map(i => [i.category, i.limitCents]));
       let n = 0;
