@@ -11,7 +11,11 @@ pg.types.setTypeParser(1082, (v: string) => v);
 export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
 
-export function createPool(url = process.env.DATABASE_URL): Db {
+/** URL do banco: DATABASE_URL, ou os nomes que a integração Neon da Vercel pode criar. */
+export const databaseUrl = () =>
+  process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.STORAGE_URL ?? process.env.NEON_DATABASE_URL ?? undefined;
+
+export function createPool(url = databaseUrl()): Db {
   if (!url) throw new Error("DATABASE_URL não definida");
   // Na Vercel cada instância é pequena: poucas conexões e fecha as ociosas (use a URL "pooled" do Neon).
   return new pg.Pool({ connectionString: url, max: process.env.VERCEL ? 2 : 5, idleTimeoutMillis: 10_000 });

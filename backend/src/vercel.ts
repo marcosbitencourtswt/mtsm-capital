@@ -4,7 +4,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getRequestListener } from "@hono/node-server";
-import { createPool } from "./db.js";
+import { createPool, databaseUrl } from "./db.js";
 import { createApp } from "./app.js";
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => unknown;
@@ -18,7 +18,7 @@ function notConfigured(message: string): Handler {
 }
 
 let handler: Handler;
-if (!process.env.DATABASE_URL) {
+if (!databaseUrl()) {
   handler = notConfigured("Banco de dados não conectado. Na Vercel: Storage → Create Database → Neon → Connect; depois Deployments → Redeploy.");
 } else {
   const db = createPool(); // reaproveitado entre chamadas na mesma instância

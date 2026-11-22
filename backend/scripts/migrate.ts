@@ -6,7 +6,7 @@ import { createPool } from "../src/db.js";
 try { process.loadEnvFile(".env"); } catch { /* ok */ }
 
 /** Cria o banco se ele não existir (dispensa usar psql na instalação). */
-export async function ensureDatabase(url = process.env.DATABASE_URL) {
+export async function ensureDatabase(url = process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.STORAGE_URL) {
   if (!url) throw new Error("DATABASE_URL não definida");
   // Se o banco já existe (ex.: Neon na Vercel), não faz nada.
   const probe = createPool(url);
