@@ -4,7 +4,7 @@ export type Kind = "PAYABLE" | "RECEIVABLE";
 export type Nature = "EXPENSE" | "DEBT" | "CARD" | "INCOME" | "LOAN_IN";
 export type Status = "OPEN" | "OVERDUE" | "SETTLED" | "NO_VALUE";
 
-export interface Settlement { id: string; amountCents: number; paidOn: string; method: "ACCOUNT" | "CARD"; notes: string | null; warnings: string[]; }
+export interface Settlement { id: string; amountCents: number; paidOn: string; method: "ACCOUNT" | "CARD" | "DISCOUNT"; notes: string | null; warnings: string[]; }
 export interface Title {
   id: string; kind: Kind; nature: Nature; counterparty: string; category: string;
   amountCents: number; interestModel: string; rateBp: number; dueDate: string | null; startDate: string;

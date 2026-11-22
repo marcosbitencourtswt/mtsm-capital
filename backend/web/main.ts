@@ -17,7 +17,7 @@ const fail = (e: unknown) => toast(e instanceof ApiError ? e.message : "Sem cone
 const NATURE: Record<string, string> = { EXPENSE: "Conta", DEBT: "Dívida", CARD: "Cartão", INCOME: "Receita", LOAN_IN: "Empréstimo" };
 const STATUS: Record<string, string> = { OPEN: "Em aberto", OVERDUE: "Vencida", SETTLED: "Quitada", NO_VALUE: "Sem valor" };
 const CATEGORIES = ["ALIMENTACAO", "MORADIA", "AGUA", "LUZ", "INTERNET", "FIXO", "TRANSPORTE", "SAUDE", "EDUCACAO",
-  "DELIVERY", "RESTAURANTE", "LAZER", "ROUPAS", "BELEZA", "PRESENTES", "ASSINATURAS", "DIVIDA", "CARTAO", "MESADA", "RENDA", "VENDAS", "SERVICOS", "OUTROS"];
+  "DELIVERY", "RESTAURANTE", "LAZER", "ROUPAS", "BELEZA", "PRESENTES", "ASSINATURAS", "DIVIDA", "CARTAO", "MESADA", "IMPOSTOS", "PRO_LABORE", "RENDA", "VENDAS", "SERVICOS", "OUTROS"];
 
 /* Usuário logado */
 let me: Me | null = null;
@@ -291,9 +291,10 @@ async function payTitle(id: string) {
     <div class="full"><label>${t.kind === "PAYABLE" ? "Saiu de qual conta" : "Entrou em qual conta"} (opcional)</label><select name="acc"><option value="">Não informar</option>
       ${cashAccs.map(a => `<option value="${a.id}">${esc(a.ownerName)} · ${esc(a.institution ?? "")} ${esc(a.name)}</option>`).join("")}</select></div>
     <div class="full"><label>Observação</label><input name="notes"></div>
+    ${t.kind === "PAYABLE" ? `<label class="inline full"><input type="checkbox" name="disc"> Quitar com desconto: o que faltar vira desconto (ex.: deve 1.800, pagou 1.500 → 300 de desconto)</label>` : ""}
     <p class="muted full">Em aberto: ${money(t.openCents)}</p>`, verb, async f => {
     const r = await api<Title>(`/titles/${id}/settlements`, { method: "POST", headers: { "idempotency-key": key },
-      body: { amountCents: centsOf(f, "v"), paidOn: str(f, "dt") || undefined, ...(str(f, "m").startsWith("card:") ? { cardAccountId: str(f, "m").slice(5) } : { method: "ACCOUNT", accountId: str(f, "acc") || null }), notes: str(f, "notes") || null } });
+      body: { amountCents: centsOf(f, "v"), paidOn: str(f, "dt") || undefined, ...(str(f, "m").startsWith("card:") ? { cardAccountId: str(f, "m").slice(5) } : { method: "ACCOUNT", accountId: str(f, "acc") || null }), notes: str(f, "notes") || null, ...(f.has("disc") ? { discountRest: true } : {}) } });
     const w = r.settlements?.at(-1)?.warnings ?? [];
     toast(w.length ? `Registrado com aviso: ${w.join("; ")}` : "Registrado.", w.length > 0);
   });
@@ -304,7 +305,7 @@ async function showPays(id: string) {
   if (box.innerHTML) { box.innerHTML = ""; return; }
   const t = await api<Title>(`/titles/${id}`);
   box.innerHTML = `<ul class="pays">${(t.settlements ?? []).map((s: Settlement) => `<li>
-    <span>${br(s.paidOn)} · ${money(s.amountCents)}${s.method === "CARD" ? " · cartão" : ""}${s.warnings.length ? ` <span class="chip OVERDUE">aviso</span>` : ""}</span>
+    <span>${br(s.paidOn)} · ${money(s.amountCents)}${s.method === "CARD" ? " · cartão" : s.method === "DISCOUNT" ? " · desconto" : ""}${s.warnings.length ? ` <span class="chip OVERDUE">aviso</span>` : ""}</span>
     <span class="row"><button class="ghost sm" data-pedit="${s.id}" data-amt="${s.amountCents}" data-dt="${s.paidOn}">Editar</button>
     <button class="danger sm" data-pdel="${s.id}">Excluir</button></span></li>`).join("")}</ul>`;
 }
@@ -806,7 +807,7 @@ async function pedidosPage() {
 
 /* ===================== Orçamento ===================== */
 interface Budget { month: string; monthElapsedPct: number; items: { category: string; limitCents: number; spentCents: number; leftCents: number; pct: number }[]; }
-const SPEND_CATS = CATEGORIES.filter(c => !["RENDA", "VENDAS", "SERVICOS", "DIVIDA", "CARTAO"].includes(c));
+const SPEND_CATS = CATEGORIES.filter(c => !["RENDA", "VENDAS", "SERVICOS", "DIVIDA", "CARTAO", "IMPOSTOS", "PRO_LABORE"].includes(c));
 let budgetCache: Budget | null = null;
 function budgetCard(b: Budget | null) {
   if (!b || !b.items.length) return "";
@@ -1247,7 +1248,7 @@ async function importStatement(accountId: string, file: File) {
 
 /* ===================== Importar cadastro ===================== */
 interface ImportRes { dryRun: boolean; created: number; rows: { index: number; status: "novo" | "ja_existe" | "erro"; type: string; label: string; owner: string; summary: string; error?: string }[]; }
-const IMPORT_TYPE: Record<string, string> = { CHECKING: "Conta", SAVINGS: "Poupança", INVESTMENT: "Investimento", CARD: "Cartão", LOAN: "Dívida", CASH: "Dinheiro" };
+const IMPORT_TYPE: Record<string, string> = { RECURRENCE: "Automática", CHECKING: "Conta", SAVINGS: "Poupança", INVESTMENT: "Investimento", CARD: "Cartão", LOAN: "Dívida", CASH: "Dinheiro" };
 async function importFile(file: File) {
   let data: unknown;
   try { data = JSON.parse(await file.text()); } catch { toast("Arquivo inválido: não é um JSON.", true); return; }

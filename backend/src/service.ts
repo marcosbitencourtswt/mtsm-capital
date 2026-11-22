@@ -122,7 +122,9 @@ export async function deleteTitle(db: Db, e: Entity, id: string) {
 }
 
 /* ---------- Baixas (pagamentos/recebimentos) ---------- */
-export interface SettlementInput { amountCents: number; paidOn?: string; method?: "ACCOUNT" | "CARD"; notes?: string | null; createdBy?: string; accountId?: string | null; cardAccountId?: string | null; }
+export interface SettlementInput { amountCents: number; paidOn?: string; method?: "ACCOUNT" | "CARD"; notes?: string | null; createdBy?: string; accountId?: string | null; cardAccountId?: string | null;
+  /** Quitação com desconto: o que faltar depois deste pagamento é baixado como desconto (sem dinheiro). */
+  discountRest?: boolean; }
 
 /** Avisos (não bloqueiam): regra 7 (cartão em dívida) e pagamento acima do saldo. */
 export function settlementWarnings(nature: Nature, method: string | undefined, amount: number, open: number): string[] {
@@ -152,6 +154,7 @@ export async function createSettlement(db: Db, e: Entity, titleId: string, i: Se
     t.openCents = i.amountCents;
   }
   // Nada é bloqueado: regras viram avisos gravados.
+  if (i.discountRest && t.kind !== "PAYABLE") throw new AppError(422, "DISCOUNT_PAYABLE_ONLY", "Desconto na quitação vale para contas a pagar.");
   // Conta comum paga num cartão cadastrado: vira compra na fatura certa (despesa agora, dinheiro sai quando a fatura for paga).
   let method = i.method ?? "ACCOUNT", accountId = i.accountId;
   if (i.cardAccountId) {
@@ -164,6 +167,11 @@ export async function createSettlement(db: Db, e: Entity, titleId: string, i: Se
   await db.query(
     "INSERT INTO settlement (title_id, amount_cents, paid_on, method, notes, idempotency_key, warnings, created_by, account_id) VALUES ($1,$2,COALESCE($3::date, current_date),$4,$5,$6,$7,$8,$9)",
     [titleId, i.amountCents, i.paidOn ?? null, method, i.notes ?? null, idemKey ?? null, warnings, i.createdBy ?? null, await accountOf(db, e, accountId)]);
+  if (i.discountRest) {
+    const rest = t.openCents - i.amountCents;
+    if (rest > 0) await db.query(`INSERT INTO settlement (title_id, amount_cents, paid_on, method, notes, created_by) VALUES ($1,$2,COALESCE($3::date, current_date),'DISCOUNT',$4,$5)`,
+      [titleId, rest, i.paidOn ?? null, "Desconto na quitação", i.createdBy ?? null]);
+  }
   return { duplicate: false, title: await getTitle(db, e, titleId, asOf) };
 }
 
@@ -302,6 +310,7 @@ export async function statement(db: Db, e: Entity, fromMonth: string, toMonth: s
     const m = s.paid_on.slice(0, 7);
     const before = paidBefore.get(t.id) ?? 0;
     paidBefore.set(t.id, before + s.amount_cents);
+    if (s.method === "DISCOUNT") continue; // desconto obtido: fecha o saldo, sem caixa e sem despesa
     // Só é "via cartão" quando a compra está numa fatura: senão o dinheiro sumiria do caixa sem nunca sair.
     const viaCard = s.method === "CARD" && t.kind === "PAYABLE" && t.nature === "EXPENSE" && onBill.has(t.id);
     let already = 0;
@@ -386,7 +395,7 @@ export async function guard(db: Db, e: Entity, i: { amountCents: number; categor
   const spent = await db.query<{ v: number }>(
     `SELECT COALESCE(sum(s.amount_cents),0)::bigint AS v FROM settlement s JOIN title t ON t.id = s.title_id
      WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'EXPENSE' AND t.category = ANY($2)
-       AND to_char(s.paid_on,'YYYY-MM') = $3 AND s.deleted_at IS NULL AND t.deleted_at IS NULL`, [e, s.fixedCategories, m]);
+       AND to_char(s.paid_on,'YYYY-MM') = $3 AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.method <> 'DISCOUNT'`, [e, s.fixedCategories, m]);
   return guardCheck({ amountCents: i.amountCents, category: isFixed ? "FIXED" : "DISCRETIONARY", date,
     lockUntil: s.lockUntil, fixedCeilingCents: s.fixedCeilingCents, fixedSpentInMonthCents: spent.rows[0]!.v });
 }
@@ -482,7 +491,7 @@ export async function peopleSummary(db: Db, e: Entity, fromMonth: string, toMont
   const views = (await loadViews(db, e, asOf)).filter(t => t.kind === "PAYABLE");
   const paid = (await db.query<{ person_id: string | null; v: number }>(
     `SELECT t.person_id, sum(s.amount_cents)::bigint AS v FROM settlement s JOIN title t ON t.id = s.title_id
-     WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND s.deleted_at IS NULL AND t.deleted_at IS NULL
+     WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.method <> 'DISCOUNT'
        AND s.paid_on >= $2 AND s.paid_on < $3 GROUP BY t.person_id`, [e, from, toEnd])).rows;
   const paidBy = new Map(paid.map(r => [r.person_id ?? "none", r.v]));
   const row = (id: string | null, name: string, active = true) => {
@@ -542,7 +551,7 @@ export async function ranking(db: Db, e: Entity, date: string, weeks = 8) {
     `SELECT t.id AS title_id, t.counterparty, t.category, t.person_id, s.amount_cents, s.paid_on, t.mandatory,
             (t.category = ANY($2)) AS by_category, t.created_by
      FROM settlement s JOIN title t ON t.id = s.title_id
-     WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'EXPENSE'
+     WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'EXPENSE' AND s.method <> 'DISCOUNT'
        AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.paid_on >= $3 AND s.paid_on < $4
      ORDER BY s.paid_on DESC, s.created_at DESC`, [e, cats, histStart, w.next]);
   const isMandatory = (r: { mandatory: boolean | null; by_category: boolean }) => r.mandatory ?? r.by_category;

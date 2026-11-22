@@ -76,10 +76,10 @@ export async function previewStatement(db: Db, e: Entity, accountId: string, tex
   // Já lançado à mão: mesmo valor na mesma conta (ou cartão), até 3 dias de diferença. Cada lançamento casa uma vez só.
   const manual = card
     ? (await db.query(`SELECT s.id, s.amount_cents AS v, s.paid_on::text AS d, -1 AS sign FROM settlement s JOIN title t ON t.id = s.title_id JOIN title b ON b.id = t.card_bill_id
-        WHERE b.account_id = $1 AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.paid_on BETWEEN $2::date - 3 AND $3::date + 3
+        WHERE b.account_id = $1 AND s.deleted_at IS NULL AND s.method <> 'DISCOUNT' AND t.deleted_at IS NULL AND s.paid_on BETWEEN $2::date - 3 AND $3::date + 3
         AND NOT EXISTS (SELECT 1 FROM bank_txn x WHERE x.title_id = t.id)`, [accountId, from, to])).rows
     : (await db.query(`SELECT s.id, s.amount_cents AS v, s.paid_on::text AS d, CASE WHEN t.kind = 'RECEIVABLE' THEN 1 ELSE -1 END AS sign FROM settlement s JOIN title t ON t.id = s.title_id
-        WHERE s.account_id = $1 AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.paid_on BETWEEN $2::date - 3 AND $3::date + 3
+        WHERE s.account_id = $1 AND s.deleted_at IS NULL AND s.method <> 'DISCOUNT' AND t.deleted_at IS NULL AND s.paid_on BETWEEN $2::date - 3 AND $3::date + 3
         AND NOT EXISTS (SELECT 1 FROM bank_txn x WHERE x.title_id = t.id)
         UNION ALL
         SELECT x.id, x.amount_cents, x.day::text, CASE WHEN x.to_account_id = $1 THEN 1 ELSE -1 END FROM transfer x

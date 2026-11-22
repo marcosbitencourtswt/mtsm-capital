@@ -39,6 +39,7 @@ const titlePatch = titleCreate.omit({ kind: true, loan: true }).partial().strict
 const settlementCreate = z.object({
   amountCents: positiveCents, paidOn: isoDate.optional(), method: z.enum(["ACCOUNT", "CARD"]).optional(),
   notes: z.string().max(500).nullable().optional(), accountId: uuid.nullable().optional(), cardAccountId: uuid.nullable().optional(),
+  discountRest: z.boolean().optional(),
 }).strict();
 const settlementPatch = settlementCreate.partial().strict();
 const recurrenceCreate = z.object({
@@ -452,7 +453,7 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     requireAdmin(c);
     const i = await body(c, z.object({ version: z.literal(1), items: z.array(z.record(z.string(), z.unknown())).min(1).max(200) }).strict());
     return c.json(await accounts.importAccounts(db, c.get("entity"), c.get("user"), i.items as unknown as accounts.ImportItem[], c.req.query("dryRun") === "1",
-      x => accountCreate.parse(x) as accounts.AccountInput));
+      x => accountCreate.parse(x) as accounts.AccountInput, x => recurrenceCreate.parse(x) as svc.RecurrenceInput));
   });
   v1.get("/:entity/transfers", async c => c.json(await accounts.listTransfers(db, c.get("entity"), Math.min(200, Number(c.req.query("limit") ?? 50) || 50))));
   v1.patch("/:entity/transfers/:id", async c => c.json(await accounts.updateTransfer(db, c.get("entity"), c.get("user"), param(c, "id"), await body(c, transferInput.partial().strict()))));

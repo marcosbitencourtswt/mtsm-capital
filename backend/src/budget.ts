@@ -11,7 +11,7 @@ const monthStart = (d: string) => `${d.slice(0, 7)}-01`;
 
 async function spent(db: Db, e: Entity, month: string, categories?: string[]) {
   const r = await db.query<{ category: string; v: string }>(`SELECT t.category, sum(s.amount_cents)::bigint AS v FROM settlement s JOIN title t ON t.id = s.title_id
-    WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'EXPENSE' AND s.deleted_at IS NULL AND t.deleted_at IS NULL
+    WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'EXPENSE' AND s.method <> 'DISCOUNT' AND s.deleted_at IS NULL AND t.deleted_at IS NULL
       AND s.paid_on >= $2::date AND s.paid_on < ($2::date + interval '1 month') ${categories ? "AND t.category = ANY($3)" : ""}
     GROUP BY t.category`, categories ? [e, month, categories] : [e, month]);
   return new Map(r.rows.map(x => [x.category, Number(x.v)]));

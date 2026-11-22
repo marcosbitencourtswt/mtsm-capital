@@ -6,7 +6,7 @@
  */
 import type { Db } from "./db.js";
 import { withTx } from "./db.js";
-import { AppError, type Entity } from "./service.js";
+import { AppError, createRecurrence, type Entity, type RecurrenceInput } from "./service.js";
 import type { SessionUser } from "./auth.js";
 import { todaySP, dueDateFor, addMonths } from "./domain/finance.js";
 
@@ -234,7 +234,7 @@ export async function debtSummary(db: Db, e: Entity, asOf = todaySP()) {
   const items = po.items.filter(x => x.nature === "DEBT" || x.nature === "CARD");
   const paid = (await db.query<{ person_id: string | null; total: string; month: string }>(
     `SELECT t.person_id, sum(s.amount_cents)::bigint AS total,
-            COALESCE(sum(s.amount_cents) FILTER (WHERE s.paid_on >= date_trunc('month', $2::date)), 0)::bigint AS month
+            COALESCE(sum(s.amount_cents) FILTER (WHERE s.paid_on >= date_trunc('month', $2::date) AND s.method <> 'DISCOUNT'), 0)::bigint AS month
      FROM settlement s JOIN title t ON t.id = s.title_id
      WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'DEBT' AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.paid_on <= $2::date
      GROUP BY t.person_id`, [e, asOf])).rows;
@@ -305,14 +305,38 @@ const fmt = (c?: number | null) => (c == null ? "—" : (c / 100).toLocaleString
  * dryRun = true só mostra o que seria criado. Itens iguais (mesmo tipo, banco, nome e dono) não duplicam:
  * importar o mesmo arquivo duas vezes é seguro.
  */
-export async function importAccounts(db: Db, e: Entity, u: SessionUser, items: ImportItem[], dryRun: boolean, validate: (x: unknown) => AccountInput) {
+export async function importAccounts(db: Db, e: Entity, u: SessionUser, items: ImportItem[], dryRun: boolean, validate: (x: unknown) => AccountInput,
+  validateRec?: (x: unknown) => RecurrenceInput) {
   const people = (await db.query<{ id: string; name: string }>("SELECT id, name FROM person WHERE entity_code = $1 AND active", [e])).rows;
   const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
   const existing = (await db.query(`SELECT a.type, lower(a.name) AS name, lower(coalesce(i.name, '')) AS inst, a.owner_person_id FROM account a
     LEFT JOIN institution i ON i.id = a.institution_id WHERE a.entity_code = $1 AND a.active`, [e])).rows;
   const out: ImportRow[] = [];
   const seen = new Set<string>();
+  const recs = (await db.query("SELECT kind, lower(description) AS d FROM recurrence WHERE entity_code = $1 AND active", [e])).rows;
   for (const [index, raw] of items.entries()) {
+    const rr = raw as unknown as Record<string, unknown>;
+    if (rr.type === "RECURRENCE") {
+      // Conta automática (aluguel, nota mensal, DAS, contador...): mesmo fluxo de prévia e sem duplicar.
+      const base = { index, type: "RECURRENCE", label: String(rr.description ?? "(sem nome)"), owner: String(rr.owner ?? "Casa / dos dois") };
+      try {
+        if (!validateRec) throw new AppError(422, "UNSUPPORTED", "Importação de contas automáticas indisponível.");
+        const p = rr.owner ? people.find(x => norm(x.name) === norm(String(rr.owner))) : null;
+        if (rr.owner && !p) throw new AppError(422, "OWNER", `Pessoa "${String(rr.owner)}" não cadastrada em Pessoas da casa.`);
+        const { type: _t, owner: _o, ...rest } = rr;
+        const i = validateRec({ ...rest, personId: p?.id ?? null });
+        const summary = `${i.kind === "RECEIVABLE" ? "a receber" : "a pagar"} ${fmt(i.defaultAmountCents)} todo dia ${i.dueDay ?? "—"} desde ${i.startMonth.slice(5, 7)}/${i.startMonth.slice(0, 4)}`;
+        const key = `${i.kind}|${i.description.trim().toLowerCase()}`;
+        if (seen.has(key) || recs.some(x => x.kind === i.kind && x.d === i.description.trim().toLowerCase())) { seen.add(key); out.push({ ...base, status: "ja_existe", summary }); continue; }
+        seen.add(key);
+        if (!dryRun) await createRecurrence(db, e, i);
+        out.push({ ...base, status: "novo", summary });
+      } catch (err) {
+        const msg = err instanceof AppError ? err.message : (err as { issues?: { path: (string | number)[]; message: string }[] }).issues?.map(x => `${x.path.join(".")}: ${x.message}`).join("; ") ?? String(err);
+        out.push({ ...base, status: "erro", summary: "", error: msg });
+      }
+      continue;
+    }
     const label = [raw.institution, raw.name].filter(Boolean).join(" · ") || "(sem nome)";
     const base = { index, type: String(raw.type ?? "?"), label, owner: raw.owner ?? "Casa / dos dois" };
     try {

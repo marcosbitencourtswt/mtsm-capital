@@ -1000,3 +1000,41 @@ describe("Pedidos de compra", () => {
     expect((await req("POST", `${P}/requests/${own.id}/cancel`)).json.status).toBe("CANCELED");
   });
 });
+
+describe("Baixa com desconto", () => {
+  it("dívida de 1.800 quitada por 1.500: fecha, sai só 1.500 do caixa e os 300 não viram despesa", async () => {
+    const d = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+    const conta = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta desconto", institution: "Banco D", openingBalanceCents: 300000 })).json;
+    await req("POST", `${P}/accounts`, { type: "LOAN", name: "Dívida desconto", institution: "Credor D", loan: { installmentCents: 180000, remaining: 1, firstOpenDueDate: d } });
+    const t = (await req("GET", `${P}/titles?status=open`)).json.find((x: { counterparty: string }) => x.counterparty.startsWith("Credor D · Dívida desconto"));
+    const before = (await req("GET", `${P}/statement?from=${d.slice(0, 7)}&to=${d.slice(0, 7)}`)).json.months[0];
+    const r = await req("POST", `${P}/titles/${t.id}/settlements`, { amountCents: 150000, paidOn: d, accountId: conta.id, discountRest: true });
+    expect(r.status).toBe(201);
+    expect(r.json).toMatchObject({ status: "SETTLED", openCents: 0 });
+    expect(r.json.settlements.map((s: { method: string; amountCents: number }) => `${s.method}:${s.amountCents}`).sort()).toEqual(["ACCOUNT:150000", "DISCOUNT:30000"]);
+    expect((await req("GET", `${P}/accounts`)).json.find((a: { id: string }) => a.id === conta.id).balanceCents).toBe(150000);
+    const after = (await req("GET", `${P}/statement?from=${d.slice(0, 7)}&to=${d.slice(0, 7)}`)).json.months[0];
+    expect(after.cashOutCents - before.cashOutCents).toBe(150000);
+    expect(after.amortizationCents - before.amortizationCents).toBe(150000);
+    expect(after.expenseCents - before.expenseCents).toBe(0);
+    // receber não aceita desconto por este caminho
+    const rec = (await req("POST", `${P}/titles`, { kind: "RECEIVABLE", nature: "INCOME", counterparty: "Cliente D", category: "RENDA", amountCents: 1000, dueDate: d })).json;
+    expect((await req("POST", `${P}/titles/${rec.id}/settlements`, { amountCents: 500, paidOn: d, discountRest: true })).json.error.code).toBe("DISCOUNT_PAYABLE_ONLY");
+    expect((await req("GET", `${P}/titles/${rec.id}`)).json.settledCents).toBe(0); // nada ficou pela metade
+  });
+});
+
+describe("Importar contas automáticas", () => {
+  it("cria a conta automática, não duplica e aponta erro de campo", async () => {
+    const file = { version: 1, items: [
+      { type: "RECURRENCE", kind: "PAYABLE", nature: "EXPENSE", description: "Contador teste import", category: "FIXO", defaultAmountCents: 30000, dueDay: 10, startMonth: "2027-01" },
+      { type: "RECURRENCE", kind: "PAYABLE", nature: "EXPENSE", description: "Sem mês", category: "FIXO" },
+    ] };
+    const pre = (await req("POST", `${P}/import/accounts?dryRun=1`, file)).json;
+    expect(pre.rows.map((r: { status: string }) => r.status)).toEqual(["novo", "erro"]);
+    expect(pre.rows[0].summary.replace(/\s/g, " ")).toBe("a pagar R$ 300,00 todo dia 10 desde 01/2027");
+    expect((await req("POST", `${P}/import/accounts`, file)).json.created).toBe(1);
+    expect((await req("GET", `${P}/recurrences`)).json.some((r: { description: string }) => r.description === "Contador teste import")).toBe(true);
+    expect((await req("POST", `${P}/import/accounts`, file)).json.rows[0].status).toBe("ja_existe");
+  });
+});
