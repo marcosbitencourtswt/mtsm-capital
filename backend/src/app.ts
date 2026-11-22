@@ -7,6 +7,7 @@ import * as admin from "./admin.js";
 import * as accounts from "./accounts.js";
 import * as push from "./push.js";
 import * as statement from "./statement.js";
+import * as budget from "./budget.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import { actorStore, type Db } from "./db.js";
@@ -178,6 +179,19 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   async function safePush(fn: () => Promise<number>): Promise<number> {
     try { return await fn(); } catch (e) { console.error(JSON.stringify({ level: "warn", msg: "aviso não enviado", err: (e as Error).message })); return 0; }
   }
+  /** Orçamento: avisa Marcos e Thaís quando uma categoria cruza 80% ou 100% no mês (uma vez cada). */
+  async function budgetAlerts(e: svc.Entity, categories: string[], day?: string) {
+    await safePush(async () => {
+      const hits = await budget.crossed(db, e, categories, day);
+      if (!hits.length) return 0;
+      const brl = (v: number) => (v / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+      const to = await push.guardians(db);
+      let n = 0;
+      for (const h of hits) n += await push.notify(db, to, { title: h.level === 100 ? `Orçamento estourado: ${h.category}` : `Orçamento em 80%: ${h.category}`,
+        body: `${brl(h.spentCents)} de ${brl(h.limitCents)} no mês.`, url: "/#painel", tag: `orc-${h.category}` });
+      return n;
+    });
+  }
   /** Lembretes da manhã para quem cuida da casa: contas de hoje/amanhã, atrasadas e fechamento do mês. */
   async function dailyReminders(): Promise<number> {
     const today = todaySP(), tomorrow = new Date(Date.parse(`${today}T12:00:00Z`) + 864e5).toISOString().slice(0, 10);
@@ -318,7 +332,9 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
 
   // Baixas (pagar / receber). Idempotency-Key evita lançamento duplicado (duplo toque no celular).
   v1.post("/:entity/titles/:id/settlements", async c => {
-    const r = await svc.createSettlement(db, c.get("entity"), param(c, "id"), { ...(await body(c, settlementCreate)), createdBy: c.get("user").id }, c.req.header("idempotency-key") || undefined);
+    const i = await body(c, settlementCreate);
+    const r = await svc.createSettlement(db, c.get("entity"), param(c, "id"), { ...i, createdBy: c.get("user").id }, c.req.header("idempotency-key") || undefined);
+    if (!r.duplicate && r.title.kind === "PAYABLE" && r.title.nature === "EXPENSE") await budgetAlerts(c.get("entity"), [r.title.category], i.paidOn);
     return c.json(r.title, r.duplicate ? 200 : 201);
   });
   v1.patch("/:entity/settlements/:id", async c => { const id = param(c, "id"); await requireOwner(c, "settlement", id); return c.json(await svc.updateSettlement(db, c.get("entity"), id, await body(c, settlementPatch))); });
@@ -368,7 +384,9 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     const i = await body(c, quickInput), u = c.get("user");
     // Sem pessoa informada, o gasto é de quem lançou.
     const personId = i.personId === undefined && c.get("entity") === "PERSONAL" ? u.personId : i.personId;
-    return c.json(await svc.quickExpense(db, c.get("entity"), { ...i, personId, createdBy: u.id }), 201);
+    const r = await svc.quickExpense(db, c.get("entity"), { ...i, personId, createdBy: u.id });
+    await budgetAlerts(c.get("entity"), [i.category], i.date);
+    return c.json(r, 201);
   });
   v1.post("/:entity/incomes/quick", async c => {
     const i = await body(c, quickIncome), u = c.get("user");
@@ -393,7 +411,20 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     const row = z.object({ fitid: z.string().min(1).max(120), date: isoDate, amountCents: z.number().int().refine(v => v !== 0), memo: z.string().trim().min(1).max(120),
       action: z.enum(["despesa", "receita", "transferencia", "ignorar"]), category: z.string().trim().max(40).optional(), personId: uuid.nullable().optional(), toAccountId: uuid.nullable().optional() }).strict();
     const i = await body(c, z.object({ accountId: uuid, rows: z.array(row).min(1).max(1500) }).strict());
-    return c.json(await statement.commitStatement(db, c.get("entity"), c.get("user"), i.accountId, i.rows));
+    const r = await statement.commitStatement(db, c.get("entity"), c.get("user"), i.accountId, i.rows);
+    const byMonth = new Map<string, string[]>();
+    for (const x of i.rows) if (x.action === "despesa" && x.category) byMonth.set(x.date.slice(0, 7), [...(byMonth.get(x.date.slice(0, 7)) ?? []), x.category]);
+    for (const [m, cats] of byMonth) await budgetAlerts(c.get("entity"), cats, `${m}-28`);
+    return c.json(r);
+  });
+  // Orçamento por categoria (Marcos e Thaís definem; todos veem)
+  v1.get("/:entity/budget", async c => c.json(await budget.list(db, c.get("entity"), asOf(c))));
+  v1.put("/:entity/budget/:category", async c => {
+    const u = c.get("user");
+    if (u.role !== "ADMIN" && !u.isGuardian) throw new AppError(403, "GUARDIAN_ONLY", "Só os responsáveis definem o orçamento.");
+    const cat = param(c, "category", z.string().max(40)).toUpperCase();
+    if (!/^[A-Z_]{2,40}$/.test(cat)) throw new AppError(400, "INVALID_PARAM", "Categoria inválida.");
+    return c.json(await budget.setLimit(db, c.get("entity"), cat, (await body(c, z.object({ limitCents: cents.nullable() }).strict())).limitCents));
   });
   v1.post("/:entity/import/accounts", async c => {
     requireAdmin(c);

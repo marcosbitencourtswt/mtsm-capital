@@ -314,3 +314,6 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
 .st-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 4px; }
 .st-grid select { min-width: 0; height: 36px; font-size: 13px; }
 @media (min-width: 700px) { .st-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.bar.budget i { background: var(--success); }
+.bar.budget.warn i { background: var(--warning); }
+.bar.budget.over i { background: var(--danger); }

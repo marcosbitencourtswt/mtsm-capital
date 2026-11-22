@@ -923,3 +923,28 @@ describe("Importar extrato OFX", () => {
     expect((await req("POST", `${P}/import/statement/preview`, { accountId: minha.id, text: novo })).json.rows[0]).toMatchObject({ category: "PRESENTES", hint: "como da última vez" });
   });
 });
+
+describe("Orçamento por categoria", () => {
+  it("mostra gasto x teto no mês e avisa uma vez ao cruzar 80% e 100%", async () => {
+    const { setSender } = await import("../src/push.js");
+    const sent: string[] = [];
+    // conta só o aparelho deste teste (o admin já tem outros inscritos de testes anteriores)
+    setSender(async (sub, payload) => { if (sub.endpoint.endsWith("/orc")) sent.push(JSON.parse(payload).title); });
+    await req("POST", "/api/v1/push/subscribe", { endpoint: "https://push.example/orc", keys: { p256dh: "B".repeat(87), auth: "A".repeat(22) } });
+    const d = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+    expect((await req("PUT", `${P}/budget/DELIVERY`, { limitCents: 10000 })).status).toBe(200);
+    const gasto = (v: number) => req("POST", `${P}/expenses/quick`, { amountCents: v, description: "Lanche app", category: "DELIVERY", date: d });
+    await gasto(5000);
+    expect(sent.filter(t => t.includes("DELIVERY"))).toEqual([]);
+    await gasto(3500); // 85%
+    await gasto(500);  // 90%: não repete o de 80%
+    expect(sent.filter(t => t.includes("DELIVERY"))).toEqual(["Orçamento em 80%: DELIVERY"]);
+    await gasto(2000); // 110%
+    expect(sent.filter(t => t.includes("DELIVERY"))).toEqual(["Orçamento em 80%: DELIVERY", "Orçamento estourado: DELIVERY"]);
+    const b = (await req("GET", `${P}/budget`)).json;
+    expect(b.items.find((i: { category: string }) => i.category === "DELIVERY")).toMatchObject({ limitCents: 10000, spentCents: 11000, leftCents: -1000, pct: 110 });
+    // membro comum não muda o orçamento; tirar o teto remove da lista
+    expect((await req("PUT", `${P}/budget/DELIVERY`, { limitCents: null })).status).toBe(200);
+    expect((await req("GET", `${P}/budget`)).json.items.some((i: { category: string }) => i.category === "DELIVERY")).toBe(false);
+  });
+});

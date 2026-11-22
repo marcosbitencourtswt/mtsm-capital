@@ -98,6 +98,7 @@ async function painel() {
     personal ? api<Board>("/conduct/board").catch(() => null) : Promise.resolve(null), api<Acc[]>("/accounts").catch(() => [] as Acc[])]);
   const ds = personal ? await api<DebtSummary>("/debts/summary").catch(() => null) : null;
   pendingCache = personal && isGuardian() ? await api<Pending[]>("/conduct/pending").catch(() => []) : [];
+  budgetCache = await api<Budget>("/budget").catch(() => null);
   const live = accs.filter(a => a.active);
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
   const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
@@ -114,6 +115,7 @@ async function painel() {
   </div>
   ${pendingCard(pendingCache)}
   ${ds ? debtBoard(ds) : ""}
+  ${budgetCard(budgetCache)}
   ${cb ? todayCard(cb) : ""}
   ${rk ? spendKpis(rk) : ""}
   ${d.overdue.length ? `<div class="alert danger"><b>${d.overdue.length} conta(s) vencida(s):</b> ${d.overdue.map(t => `${esc(t.counterparty)} ${money(t.openCents)}`).join(" · ")}</div>` : ""}
@@ -391,7 +393,8 @@ async function config() {
     api<Recurrence[]>("/recurrences"),
     api<{ id: string; paidOn: string; amountCents: number; warnings: string[]; counterparty: string }[]>("/warnings"),
   ]);
-  return `${await pushCard()}<div class="card"><h3>Verificação em duas etapas</h3>
+  const bForm = isGuardian() ? budgetForm(await api<Budget>("/budget")) : "";
+  return `${await pushCard()}${bForm}<div class="card"><h3>Verificação em duas etapas</h3>
     ${me?.totpEnabled
       ? `<p><span class="chip SETTLED">Ativa</span> Ao entrar num aparelho novo, além da senha o sistema pede o código do app autenticador.</p>
          <div class="row"><button class="ghost sm" data-mfaoff>Desativar</button></div>`
@@ -753,6 +756,25 @@ let bkStrategy: "juros" | "rapidas" | "nome" = "juros";
 const STRATEGY = { juros: ["Menos juros", "Atrasados e depois os juros mais altos. Economiza mais dinheiro."],
   rapidas: ["Vitórias rápidas", "Menores primeiro. Fecha dívidas rápido e dá fôlego."],
   nome: ["Limpar o nome", "Negativadas e as atrasadas há mais tempo primeiro."] } as const;
+/* ===================== Orçamento ===================== */
+interface Budget { month: string; monthElapsedPct: number; items: { category: string; limitCents: number; spentCents: number; leftCents: number; pct: number }[]; }
+const SPEND_CATS = CATEGORIES.filter(c => !["RENDA", "VENDAS", "SERVICOS", "DIVIDA", "CARTAO"].includes(c));
+let budgetCache: Budget | null = null;
+function budgetCard(b: Budget | null) {
+  if (!b || !b.items.length) return "";
+  return `<div class="card"><div class="row spread"><h3 style="margin:0">Orçamento do mês</h3><span class="muted">${b.monthElapsedPct}% do mês passou</span></div>
+    <ul class="imp">${b.items.map(i => `<li><div class="row spread"><b>${esc(i.category)}</b><span class="${i.pct >= 100 ? "neg" : ""}">${money(i.spentCents)} de ${money(i.limitCents)}</span></div>
+      <div class="bar budget ${i.pct >= 100 ? "over" : i.pct >= 80 ? "warn" : ""}" role="progressbar" aria-valuenow="${i.pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(i.category)}"><i style="width:${Math.min(100, i.pct)}%"></i></div>
+      <div class="muted">${i.leftCents >= 0 ? `sobram ${money(i.leftCents)}` : `<span class="neg">passou ${money(-i.leftCents)}</span>`}${i.pct > b.monthElapsedPct + 10 && i.pct < 100 ? " · ritmo acima do mês" : ""}</div></li>`).join("")}</ul></div>`;
+}
+function budgetForm(b: Budget) {
+  const lim = new Map(b.items.map(i => [i.category, i.limitCents]));
+  return `<div class="card"><h3>Orçamento por categoria</h3>
+    <p class="muted">Defina um teto mensal só nas categorias que quer vigiar (deixe vazio nas outras). O Painel mostra a barra e vocês dois recebem aviso ao passar de 80% e de 100%.</p>
+    <form class="form" id="budget-f">${SPEND_CATS.map(c => `<div><label>${c}</label><input name="b_${c}" inputmode="decimal" placeholder="sem teto" value="${lim.has(c) ? moneyInput(lim.get(c)!) : ""}"></div>`).join("")}
+      <div class="full"><button>Salvar orçamento</button></div></form></div>`;
+}
+
 /* ===================== Painel de dívidas ===================== */
 interface DebtRow { personId: string | null; name: string; owedCents: number; debtOpenCents: number; cardsOpenCents: number; paidCents: number; paidThisMonthCents: number;
   progressPct: number; count: number; overdueCount: number; overdueCents: number; negativados: number; monthlyInterestCents: number; unknownRates: number; }
@@ -1407,6 +1429,15 @@ view.addEventListener("submit", async e => {
       if (str(f, "from") === str(f, "to")) { toast("Escolha contas diferentes em De e Para.", true); return; }
       await api("/transfers", { method: "POST", body: { fromAccountId: str(f, "from"), toAccountId: str(f, "to"), amountCents: centsOf(f, "v"), day: str(f, "dt") || undefined } });
       toast("Transferência registrada."); await render();
+    } else if (form.id === "budget-f") {
+      const f = new FormData(form), cur = await api<Budget>("/budget"), old = new Map(cur.items.map(i => [i.category, i.limitCents]));
+      let n = 0;
+      for (const c of SPEND_CATS) {
+        const raw = str(f, `b_${c}`), v = raw ? parseMoney(raw) : null;
+        if (raw && (v == null || !Number.isFinite(v) || v <= 0)) { toast(`Valor inválido em ${c}.`, true); return; }
+        if ((old.get(c) ?? null) !== v) { await api(`/budget/${c}`, { method: "PUT", body: { limitCents: v } }); n++; }
+      }
+      toast(n ? `Orçamento salvo (${n} categoria${n > 1 ? "s" : ""}).` : "Nada mudou."); await render();
     } else if (form.id === "audit-f") {
       const f = new FormData(form); auditQ = { actor: str(f, "actor"), area: str(f, "area"), from: str(f, "from"), to: str(f, "to") }; await render();
     } else if (form.id === "ret-f") {
