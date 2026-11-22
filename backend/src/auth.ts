@@ -2,7 +2,7 @@
  * Autenticação: e-mail + senha (scrypt), sessão em cookie HttpOnly guardada no banco (revogável),
  * bloqueio após 5 tentativas erradas. Sem dependências externas (node:crypto).
  */
-import { scrypt as scryptCb, randomBytes, timingSafeEqual, createHash } from "node:crypto";
+import { scrypt as scryptCb, randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypto";
 import { promisify } from "node:util";
 import type { Db } from "./db.js";
 import { AppError } from "./service.js";
@@ -35,8 +35,8 @@ export function validatePassword(pw: string) {
   if (/^(.)\1+$/.test(pw) || /^(\d+|(senha|password|mudar|trocar)\d*)$/i.test(pw)) throw new AppError(422, "WEAK_PASSWORD", "Senha fácil demais. Use uma frase ou misture palavras e números.");
 }
 
-export interface SessionUser { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; }
-const USER_COLS = `u.id, u.email, u.name, u.nickname, u.role, u.person_id AS "personId", u.must_change_password AS "mustChangePassword", u.is_guardian AS "isGuardian", u.is_root AS "isRoot"`;
+export interface SessionUser { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; totpEnabled: boolean; }
+const USER_COLS = `u.id, u.email, u.name, u.nickname, u.role, u.person_id AS "personId", u.must_change_password AS "mustChangePassword", u.is_guardian AS "isGuardian", u.is_root AS "isRoot", (u.totp_secret IS NOT NULL) AS "totpEnabled"`;
 
 const IP_MAX_FAILS = 20, IP_WINDOW_MIN = 15;
 /** Limite por endereço de rede: impede tentar muitas senhas (ou travar contas de outros) a partir do mesmo lugar. */
@@ -65,13 +65,126 @@ export async function login(db: Db, emailRaw: string, pw: string, userAgent?: st
     await db.query(`UPDATE app_user SET failed_attempts = $2, locked_until = CASE WHEN $2 >= ${MAX_FAILS} THEN now() + interval '${LOCK_MINUTES} minutes' END WHERE id = $1`, [u.id, fails]);
     throw new AppError(422, "INVALID_LOGIN", fails >= MAX_FAILS ? `Conta bloqueada por ${LOCK_MINUTES} minutos depois de ${MAX_FAILS} tentativas.` : "E-mail ou senha incorretos.");
   }
-  await db.query("UPDATE app_user SET failed_attempts = 0, locked_until = NULL, last_login_at = now() WHERE id = $1", [u.id]);
+  await db.query("UPDATE app_user SET failed_attempts = 0, locked_until = NULL WHERE id = $1", [u.id]);
+  const { password_hash: _h, active: _a, failed_attempts: _f, locked_until: _l, ...user } = u;
+  if (u.totpEnabled) {
+    // Senha certa, mas falta o código do autenticador: devolve um desafio de 5 minutos, sem sessão.
+    const challenge = randomBytes(32).toString("base64url");
+    await db.query("DELETE FROM mfa_challenge WHERE expires_at < now()");
+    await db.query("INSERT INTO mfa_challenge (token_hash, user_id, user_agent, expires_at) VALUES ($1, $2, $3, now() + interval '5 minutes')",
+      [sha256(challenge), u.id, (userAgent ?? "").slice(0, 200)]);
+    return { mfaRequired: true as const, challenge };
+  }
   await recordIp(db, ip, true);
+  return { mfaRequired: false as const, token: await newSession(db, u.id, userAgent), user: user as SessionUser };
+}
+
+async function newSession(db: Db, userId: string, userAgent?: string) {
   const token = randomBytes(32).toString("base64url");
   await db.query(`INSERT INTO user_session (token_hash, user_id, expires_at, user_agent) VALUES ($1, $2, now() + interval '${SESSION_DAYS} days', $3)`,
-    [sha256(token), u.id, (userAgent ?? "").slice(0, 200)]);
-  const { password_hash: _h, active: _a, failed_attempts: _f, locked_until: _l, ...user } = u;
-  return { token, user: user as SessionUser };
+    [sha256(token), userId, (userAgent ?? "").slice(0, 200)]);
+  await db.query("UPDATE app_user SET last_login_at = now() WHERE id = $1", [userId]);
+  return token;
+}
+
+/* ---------- Verificação em duas etapas (TOTP, RFC 6238) — sem SMS, sem custo ---------- */
+const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+export function base32(buf: Buffer): string {
+  let bits = 0, val = 0, out = "";
+  for (const b of buf) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } }
+  if (bits > 0) out += B32[(val << (5 - bits)) & 31];
+  return out;
+}
+function unbase32(s: string): Buffer {
+  let bits = 0, val = 0; const out: number[] = [];
+  for (const ch of s.replace(/=+$/, "").toUpperCase()) { const i = B32.indexOf(ch); if (i < 0) continue; val = (val << 5) | i; bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; } }
+  return Buffer.from(out);
+}
+export function totpAt(secret: string, step: number): string {
+  const msg = Buffer.alloc(8); msg.writeBigUInt64BE(BigInt(step));
+  const h = createHmac("sha1", unbase32(secret)).update(msg).digest();
+  const o = h[h.length - 1]! & 15;
+  return String((h.readUInt32BE(o) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+const nowStep = () => Math.floor(Date.now() / 30000);
+/** Aceita 30 s antes/depois (relógio do celular). Devolve o passo usado, ou null. */
+function matchTotp(secret: string, code: string, lastStep: number | null): number | null {
+  if (!/^\d{6}$/.test(code)) return null;
+  const n = nowStep();
+  for (const st of [n - 1, n, n + 1]) {
+    if (lastStep != null && st <= lastStep) continue; // código já usado
+    const a = Buffer.from(totpAt(secret, st)), b = Buffer.from(code);
+    if (timingSafeEqual(a, b)) return st;
+  }
+  return null;
+}
+const normRecovery = (c: string) => c.replace(/[^a-z0-9]/gi, "").toLowerCase();
+
+export async function loginMfa(db: Db, challenge: string, codeRaw: string, ip?: string) {
+  await checkIp(db, ip);
+  const r = await db.query(`SELECT c.user_id, c.user_agent, c.attempts, u.totp_secret, u.totp_last_step, u.active FROM mfa_challenge c JOIN app_user u ON u.id = c.user_id
+    WHERE c.token_hash = $1 AND c.expires_at > now()`, [sha256(challenge)]);
+  const ch = r.rows[0];
+  if (!ch || !ch.active || !ch.totp_secret) throw new AppError(422, "MFA_EXPIRED", "O tempo para digitar o código acabou. Entre de novo com e-mail e senha.");
+  const code = codeRaw.replace(/\s/g, "");
+  let ok = false;
+  const st = matchTotp(ch.totp_secret, code, ch.totp_last_step == null ? null : Number(ch.totp_last_step));
+  if (st != null) { ok = true; await db.query("UPDATE app_user SET totp_last_step = $2 WHERE id = $1", [ch.user_id, st]); }
+  else if (code.length >= 8) {
+    const used = await db.query("UPDATE recovery_code SET used_at = now() WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL", [ch.user_id, sha256(normRecovery(code))]);
+    ok = (used.rowCount ?? 0) > 0;
+  }
+  if (!ok) {
+    await recordIp(db, ip, false);
+    const left = await db.query("UPDATE mfa_challenge SET attempts = attempts + 1 WHERE token_hash = $1 RETURNING attempts", [sha256(challenge)]);
+    if ((left.rows[0]?.attempts ?? 99) >= 5) { await db.query("DELETE FROM mfa_challenge WHERE token_hash = $1", [sha256(challenge)]); throw new AppError(422, "MFA_EXPIRED", "Código errado muitas vezes. Entre de novo com e-mail e senha."); }
+    throw new AppError(422, "MFA_INVALID", "Código incorreto. Confira o app autenticador (o código muda a cada 30 segundos).");
+  }
+  await db.query("DELETE FROM mfa_challenge WHERE token_hash = $1", [sha256(challenge)]);
+  await recordIp(db, ip, true);
+  const token = await newSession(db, ch.user_id, ch.user_agent);
+  return { token, user: (await sessionUser(db, token))! };
+}
+
+export async function totpSetup(db: Db, userId: string) {
+  const u = (await db.query("SELECT email, totp_secret FROM app_user WHERE id = $1", [userId])).rows[0];
+  if (u.totp_secret) throw new AppError(409, "MFA_ALREADY_ON", "A verificação em duas etapas já está ativa.");
+  const secret = base32(randomBytes(20));
+  await db.query("UPDATE app_user SET totp_pending = $2 WHERE id = $1", [userId, secret]);
+  const label = encodeURIComponent(`MTSM Capital:${u.email}`);
+  return { secret, uri: `otpauth://totp/${label}?secret=${secret}&issuer=MTSM%20Capital&algorithm=SHA1&digits=6&period=30` };
+}
+export async function totpEnable(db: Db, userId: string, code: string) {
+  const u = (await db.query("SELECT totp_pending FROM app_user WHERE id = $1", [userId])).rows[0];
+  if (!u?.totp_pending) throw new AppError(422, "MFA_NO_SETUP", "Comece de novo: toque em Ativar.");
+  const st = matchTotp(u.totp_pending, code.replace(/\s/g, ""), null);
+  if (st == null) throw new AppError(422, "MFA_INVALID", "Código incorreto. Confira se o horário do celular está automático.");
+  await db.query("UPDATE app_user SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = $2, totp_enabled_at = now() WHERE id = $1", [userId, st]);
+  return { recoveryCodes: await newRecoveryCodes(db, userId) };
+}
+async function newRecoveryCodes(db: Db, userId: string) {
+  await db.query("DELETE FROM recovery_code WHERE user_id = $1", [userId]);
+  const codes = Array.from({ length: 8 }, () => { const c = base32(randomBytes(7)).slice(0, 10).toLowerCase(); return `${c.slice(0, 5)}-${c.slice(5)}`; });
+  for (const c of codes) await db.query("INSERT INTO recovery_code (user_id, code_hash) VALUES ($1, $2)", [userId, sha256(normRecovery(c))]);
+  return codes;
+}
+export async function totpDisable(db: Db, userId: string, password: string) {
+  const r = await db.query("SELECT password_hash FROM app_user WHERE id = $1", [userId]);
+  if (!(await verifyPassword(password, r.rows[0].password_hash))) throw new AppError(422, "INVALID_LOGIN", "Senha incorreta.");
+  await clearTotp(db, userId);
+}
+async function clearTotp(db: Db, userId: string) {
+  await db.query("UPDATE app_user SET totp_secret = NULL, totp_pending = NULL, totp_last_step = NULL, totp_enabled_at = NULL WHERE id = $1", [userId]);
+  await db.query("DELETE FROM recovery_code WHERE user_id = $1", [userId]);
+}
+/** Celular perdido: o admin desliga o 2FA de alguém (root só por ele mesmo; admin só pelo root). */
+export async function adminResetTotp(db: Db, id: string, actor: Actor) {
+  const t = (await db.query("SELECT role, is_root FROM app_user WHERE id = $1", [id])).rows[0];
+  if (!t) throw new AppError(404, "USER_NOT_FOUND", "Usuário não encontrado.");
+  if (t.is_root && actor.id !== id) throw new AppError(403, "ROOT_PROTECTED", "O root só pode ser alterado por ele mesmo.");
+  if (t.role === "ADMIN" && !actor.isRoot) throw new AppError(403, "ROOT_ONLY", "Só o root gerencia administradores.");
+  await clearTotp(db, id);
+  await db.query("DELETE FROM user_session WHERE user_id = $1", [id]);
 }
 
 export async function sessionUser(db: Db, token: string | undefined): Promise<SessionUser | null> {
@@ -97,7 +210,7 @@ export async function changePassword(db: Db, userId: string, current: string, ne
 }
 
 /* ---------- Administração de usuários (só ADMIN) ---------- */
-const PUBLIC_COLS = `id, email, name, nickname, role, person_id AS "personId", is_guardian AS "isGuardian", is_root AS "isRoot", active, must_change_password AS "mustChangePassword", last_login_at AS "lastLoginAt", created_at AS "createdAt"`;
+const PUBLIC_COLS = `id, email, name, nickname, role, person_id AS "personId", is_guardian AS "isGuardian", is_root AS "isRoot", active, must_change_password AS "mustChangePassword", last_login_at AS "lastLoginAt", created_at AS "createdAt", (totp_secret IS NOT NULL) AS "totpEnabled"`;
 export async function listUsers(db: Db) {
   return (await db.query(`SELECT ${PUBLIC_COLS} FROM app_user ORDER BY is_root DESC, role, name`)).rows;
 }
@@ -172,5 +285,7 @@ export async function setupFirstAdmin(db: Db, expectedToken: string | undefined,
     SELECT $1, $2, 'Gastador', 'ADMIN', true, true, false, $3 WHERE NOT EXISTS (SELECT 1 FROM app_user) RETURNING id`,
     [i.email.trim().toLowerCase(), i.name.trim(), await hashPassword(i.password)]);
   if (!r.rowCount) throw new AppError(409, "ALREADY_SETUP", "O sistema já foi instalado. Entre com seu e-mail e senha.");
-  return login(db, i.email, i.password, userAgent);
+  const r2 = await login(db, i.email, i.password, userAgent);
+  if (r2.mfaRequired) throw new AppError(409, "ALREADY_SETUP", "O sistema já foi instalado.");
+  return r2;
 }

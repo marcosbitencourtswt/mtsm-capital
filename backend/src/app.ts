@@ -153,12 +153,19 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   });
 
   /* ---- Login ---- */
+  const clientIp = (c: Context) => (c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "").split(",")[0]!.trim() || undefined;
   const cookieOpts = (c: Context) => ({ httpOnly: true, sameSite: "Lax" as const, path: "/",
     secure: opts.secureCookies ?? (c.req.header("x-forwarded-proto") === "https" || c.req.url.startsWith("https:")) });
   v1.post("/auth/login", async c => {
     const i = await body(c, loginInput);
-    const ip = (c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "").split(",")[0]!.trim() || undefined;
-    const r = await auth.login(db, i.email, i.password, c.req.header("user-agent"), ip);
+    const r = await auth.login(db, i.email, i.password, c.req.header("user-agent"), clientIp(c));
+    if (r.mfaRequired) return c.json({ mfaRequired: true, challenge: r.challenge });
+    setCookie(c, COOKIE, r.token, { ...cookieOpts(c), maxAge: auth.SESSION_DAYS * 86400 });
+    return c.json(r.user);
+  });
+  v1.post("/auth/login/mfa", async c => {
+    const i = await body(c, z.object({ challenge: z.string().min(20).max(100), code: z.string().min(6).max(20) }).strict());
+    const r = await auth.loginMfa(db, i.challenge, i.code, clientIp(c));
     setCookie(c, COOKIE, r.token, { ...cookieOpts(c), maxAge: auth.SESSION_DAYS * 86400 });
     return c.json(r.user);
   });
@@ -193,6 +200,10 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     await auth.changePassword(db, c.get("user").id, i.current, i.next, c.get("token"));
     return c.body(null, 204);
   });
+  v1.post("/auth/2fa/setup", async c => c.json(await auth.totpSetup(db, c.get("user").id)));
+  v1.post("/auth/2fa/enable", async c => c.json(await auth.totpEnable(db, c.get("user").id, (await body(c, z.object({ code: z.string().max(20) }).strict())).code)));
+  v1.post("/auth/2fa/disable", async c => { await auth.totpDisable(db, c.get("user").id, (await body(c, z.object({ password: z.string().max(200) }).strict())).password); return c.body(null, 204); });
+  v1.post("/admin/users/:id/reset-2fa", async c => { requireAdmin(c); await auth.adminResetTotp(db, param(c, "id"), c.get("user")); return c.body(null, 204); });
   v1.get("/admin/users", async c => { requireAdmin(c); return c.json(await auth.listUsers(db)); });
   v1.post("/admin/users", async c => { requireAdmin(c); return c.json(await auth.createUser(db, await body(c, userCreate), c.get("user")), 201); });
   v1.patch("/admin/users/:id", async c => { requireAdmin(c); return c.json(await auth.updateUser(db, param(c, "id"), await body(c, userPatch), c.get("user"))); });

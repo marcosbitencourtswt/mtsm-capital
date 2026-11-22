@@ -6,7 +6,7 @@ import { createPool, type Db } from "../src/db.js";
 import { createApp } from "../src/app.js";
 import { migrate, ensureDatabase } from "../scripts/migrate.js";
 import { seed } from "../scripts/seed.js";
-import { createUser } from "../src/auth.js";
+import { createUser, totpAt } from "../src/auth.js";
 
 try { process.loadEnvFile(".env"); } catch { /* ok */ }
 const URL = process.env.TEST_DATABASE_URL ?? "postgres://postgres@127.0.0.1:5432/nofinance_test";
@@ -605,5 +605,44 @@ describe("Cartão sem contagem dupla e segurança do login", () => {
     expect((await blocked.json()).error.code).toBe("TOO_MANY_ATTEMPTS");
     // outro endereço segue livre
     expect((await (await tryLogin("198.51.100.7")).json()).error.code).toBe("INVALID_LOGIN");
+  });
+});
+
+describe("Verificação em duas etapas", () => {
+  const post = async (path: string, body: unknown, ck = "") => {
+    const r = await app.request(path, { method: "POST", headers: { "content-type": "application/json", cookie: ck }, body: JSON.stringify(body) });
+    const t = await r.text();
+    return { status: r.status, cookie: (r.headers.get("set-cookie") ?? "").split(";")[0]!, json: t ? JSON.parse(t) : null };
+  };
+  it("ativa, exige código no login, aceita código de recuperação uma vez e o admin consegue zerar", async () => {
+    const u = await createUser(db, { email: "mfa@familia.test", name: "Teste MFA", password: "frase-longa-do-teste" });
+    const s1 = await post("/api/v1/auth/login", { email: "mfa@familia.test", password: "frase-longa-do-teste" });
+    const ck = s1.cookie;
+    const { secret, uri } = (await post("/api/v1/auth/2fa/setup", {}, ck)).json;
+    expect(uri).toContain("otpauth://totp/");
+    expect((await post("/api/v1/auth/2fa/enable", { code: "000000" }, ck)).status).toBe(422);
+    const step = Math.floor(Date.now() / 30000);
+    const en = await post("/api/v1/auth/2fa/enable", { code: totpAt(secret, step) }, ck);
+    expect(en.json.recoveryCodes).toHaveLength(8);
+    // o segredo não vai para o registro de alterações
+    const leak = await db.query("SELECT count(*)::int AS n FROM audit_log WHERE table_name = 'app_user' AND (new_data ? 'totp_secret' OR new_data ? 'totp_pending')");
+    expect(leak.rows[0].n).toBe(0);
+
+    const l = await post("/api/v1/auth/login", { email: "mfa@familia.test", password: "frase-longa-do-teste" });
+    expect(l.json.mfaRequired).toBe(true); expect(l.cookie).toBe(""); // senha certa ainda não dá sessão
+    expect((await post("/api/v1/auth/login/mfa", { challenge: l.json.challenge, code: totpAt(secret, step) })).json.error.code).toBe("MFA_INVALID"); // reuso bloqueado
+    const ok = await post("/api/v1/auth/login/mfa", { challenge: l.json.challenge, code: totpAt(secret, step + 1) });
+    expect(ok.status).toBe(200); expect(ok.json.totpEnabled).toBe(true); expect(ok.cookie).toMatch(/^nf_session=/);
+    expect((await post("/api/v1/auth/login/mfa", { challenge: l.json.challenge, code: totpAt(secret, step + 1) })).json.error.code).toBe("MFA_EXPIRED"); // desafio é de uso único
+
+    const rc = en.json.recoveryCodes[0];
+    const l2 = await post("/api/v1/auth/login", { email: "mfa@familia.test", password: "frase-longa-do-teste" });
+    expect((await post("/api/v1/auth/login/mfa", { challenge: l2.json.challenge, code: rc.toUpperCase() })).status).toBe(200);
+    const l3 = await post("/api/v1/auth/login", { email: "mfa@familia.test", password: "frase-longa-do-teste" });
+    expect((await post("/api/v1/auth/login/mfa", { challenge: l3.json.challenge, code: rc })).json.error.code).toBe("MFA_INVALID");
+
+    expect((await post(`/api/v1/admin/users/${u.id}/reset-2fa`, {}, cookie)).status).toBe(204);
+    const l4 = await post("/api/v1/auth/login", { email: "mfa@familia.test", password: "frase-longa-do-teste" });
+    expect(l4.json.mfaRequired).toBeUndefined(); expect(l4.cookie).toMatch(/^nf_session=/);
   });
 });

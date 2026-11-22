@@ -28,6 +28,14 @@
       <button type="submit">Entrar</button>
       <p class="muted">Acesso só da família. Esqueceu a senha? Peça ao administrador para redefinir.</p>
     </form>
+    <form class="login-card" id="mfa-form" hidden novalidate>
+      <h1>Código de verificação</h1>
+      <p class="muted">Abra o app autenticador (Google ou Microsoft Authenticator) e digite os 6 números de <b>MTSM Capital</b>. Sem o celular? Use um código de recuperação.</p>
+      <div><label for="mfa-code">Código</label><input id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="20" required></div>
+      <p class="login-err" id="mfa-err" role="alert"></p>
+      <button type="submit">Confirmar</button>
+      <button type="button" class="ghost" id="mfa-back">Voltar</button>
+    </form>
     <form class="login-card" id="setup-form" hidden novalidate>
       <h1>Instalar o sistema</h1>
       <p class="muted">Primeiro acesso: crie a conta do administrador. Use o código de instalação (SETUP_TOKEN) que você colocou na Vercel.</p>

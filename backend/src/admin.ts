@@ -48,7 +48,7 @@ const ACTIONS: Record<string, string> = { INSERT: "criou", UPDATE: "alterou", DE
 /** Últimas alterações (sem senhas: a auditoria de usuário já exclui o hash). */
 export async function audit(db: Db, limit: number) {
   const rows = (await db.query(`SELECT id, table_name, action, row_id, at, old_data, new_data FROM audit_log ORDER BY id DESC LIMIT $1`, [limit * 10])).rows;
-  const NOISE = new Set(["updated_at", "last_seen_at", "last_login_at", "failed_attempts", "locked_until"]);
+  const NOISE = new Set(["updated_at", "last_seen_at", "last_login_at", "failed_attempts", "locked_until", "totp_last_step"]);
   // Fora do registro: faltas geradas automaticamente pelo sistema e atualizações de "último acesso".
   const relevant = rows.filter(r => {
     if (r.table_name === "conduct_entry" && r.action === "INSERT" && !r.new_data?.created_by) return false;

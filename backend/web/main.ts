@@ -1,4 +1,5 @@
 import { api, root, ApiError, getEntity, setEntity, type Title, type Recurrence, type Kind, type Settlement, type Person, type Me } from "./api.js";
+import qrcode from "qrcode-generator";
 import { money, parseMoney, moneyInput, today, br, monthLabel, addMonths, pct, esc } from "./fmt.js";
 
 /* ===================== Infra de UI ===================== */
@@ -367,7 +368,13 @@ async function config() {
     api<Recurrence[]>("/recurrences"),
     api<{ id: string; paidOn: string; amountCents: number; warnings: string[]; counterparty: string }[]>("/warnings"),
   ]);
-  return `<div class="row spread"><h2>Contas automáticas</h2>${isAdmin() ? "<button data-newrec>+ Nova</button>" : ""}</div>
+  return `<div class="card"><h3>Verificação em duas etapas</h3>
+    ${me?.totpEnabled
+      ? `<p><span class="chip SETTLED">Ativa</span> Ao entrar num aparelho novo, além da senha o sistema pede o código do app autenticador.</p>
+         <div class="row"><button class="ghost sm" data-mfaoff>Desativar</button></div>`
+      : `<p class="muted">Protege sua conta mesmo se alguém descobrir sua senha. Grátis: usa o Google Authenticator ou o Microsoft Authenticator no celular (sem SMS).</p>
+         <div class="row"><button class="sm" data-mfaon>Ativar</button></div>`}</div>
+  <div class="row spread"><h2>Contas automáticas</h2>${isAdmin() ? "<button data-newrec>+ Nova</button>" : ""}</div>
   <p class="muted">Geradas todo mês sozinhas (mês atual e próximo). Sem valor padrão, a conta nasce "sem valor" e o 1º pagamento define; o mês seguinte usa o último valor.</p>
   <div class="list">${recs.length ? recs.map(r => `<div class="item">
     <div class="head"><span class="who">${esc(r.description)}</span><span class="amt">${r.defaultAmountCents != null ? money(r.defaultAmountCents) : "varia"}</span></div>
@@ -899,7 +906,7 @@ function editCats(current: string[]) {
 }
 
 /* ===================== Usuários (administrador) ===================== */
-interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; isRoot: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; }
+interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; isRoot: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; totpEnabled?: boolean; }
 let usersCache: UserRow[] = [];
 async function usersSection() {
   usersCache = await root<UserRow[]>("/admin/users");
@@ -908,9 +915,9 @@ async function usersSection() {
   <div class="list">${usersCache.map(u => `<div class="item">
     <div class="head"><span class="who">${esc(u.name)}${nick(u.nickname)}</span><span class="chip${u.isRoot ? " NO_VALUE" : ""}">${u.isRoot ? "Root" : u.role === "ADMIN" ? "Administrador" : u.isGuardian ? "Responsável" : "Membro"}</span></div>
     <div class="meta"><span class="muted">${esc(u.email)}</span>${u.active ? "" : `<span class="chip OVERDUE">desativado</span>`}
-      ${u.mustChangePassword ? `<span class="chip NO_VALUE">senha provisória</span>` : ""}
+      ${u.mustChangePassword ? `<span class="chip NO_VALUE">senha provisória</span>` : ""}${u.totpEnabled ? `<span class="chip SETTLED">2 etapas</span>` : ""}
       <span class="muted">último acesso: ${u.lastLoginAt ? br(u.lastLoginAt) : "nunca"}</span></div>
-    ${u.id !== me?.id && !u.isRoot && (isRoot() || u.role !== "ADMIN") ? `<div class="actions"><button class="ghost sm" data-edituser="${u.id}">Editar</button><button class="ghost sm" data-resetuser="${u.id}">Nova senha</button>
+    ${u.id !== me?.id && !u.isRoot && (isRoot() || u.role !== "ADMIN") ? `<div class="actions"><button class="ghost sm" data-edituser="${u.id}">Editar</button><button class="ghost sm" data-resetuser="${u.id}">Nova senha</button>${u.totpEnabled ? `<button class="ghost sm" data-reset2fa="${u.id}">Zerar 2 etapas</button>` : ""}
       <button class="ghost sm" data-toggleuser="${u.id}" data-active="${u.active}">${u.active ? "Desativar" : "Reativar"}</button></div>` : ""}
   </div>`).join("")}</div>`;
 }
@@ -974,6 +981,34 @@ async function adminPage() {
 }
 
 /* ===================== Sessão: login, senha, sair ===================== */
+/* ===================== Verificação em duas etapas ===================== */
+async function mfaSetup() {
+  const s = await root<{ secret: string; uri: string }>("/auth/2fa/setup", { method: "POST" });
+  const qr = qrcode(0, "M"); qr.addData(s.uri); qr.make();
+  openDialog("Ativar verificação em duas etapas", `
+    <ol class="full muted" style="margin:0;padding-left:18px">
+      <li>Instale o <b>Google Authenticator</b> ou o <b>Microsoft Authenticator</b> no celular.</li>
+      <li>No app, toque em <b>+</b> e leia o QR abaixo. Se estiver no próprio celular, escolha "inserir chave" e copie a chave.</li>
+      <li>Digite os 6 números que aparecerem.</li></ol>
+    <div class="full" style="text-align:center;background:#fff;padding:12px;border-radius:12px"><img alt="QR para o app autenticador" src="${qr.createDataURL(5, 2)}" width="220" height="220" style="image-rendering:pixelated"></div>
+    <div class="full"><label>Chave (se não der para ler o QR)</label><input readonly value="${esc(s.secret.replace(/(.{4})/g, "$1 ").trim())}" style="font-family:monospace"></div>
+    <div class="full"><label>Código de 6 números</label><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></div>`, "Ativar", async f => {
+    const r = await root<{ recoveryCodes: string[] }>("/auth/2fa/enable", { method: "POST", body: { code: str(f, "code") } });
+    me = await root<Me>("/auth/me"); dlg.close();
+    openDialog("Guarde os códigos de recuperação", `
+      <p class="full">Cada código entra <b>uma vez</b> se você perder o celular. Tire um print ou anote e guarde fora do celular. Eles não aparecem de novo.</p>
+      <pre class="full" style="font-size:1.05rem;line-height:1.8;margin:0">${r.recoveryCodes.map(esc).join("\n")}</pre>`, "Já guardei", async () => { toast("Verificação em duas etapas ativada."); });
+    dlgForm.querySelector<HTMLButtonElement>("[data-close]")!.hidden = true;
+    return false;
+  });
+}
+function mfaDisable() {
+  openDialog("Desativar verificação em duas etapas", `<p class="muted full">Sua conta volta a pedir só a senha.</p>
+    <div class="full"><label>Sua senha</label><input name="pw" type="password" autocomplete="current-password" required></div>`, "Desativar", async f => {
+    await root("/auth/2fa/disable", { method: "POST", body: { password: String(f.get("pw") ?? "") } });
+    me = await root<Me>("/auth/me"); toast("Verificação em duas etapas desativada.");
+  });
+}
 function changePassword(forced: boolean) {
   openDialog(forced ? "Crie sua senha" : "Trocar senha", `${forced ? `<p class="muted full">Primeiro acesso: troque a senha provisória por uma só sua.</p>` : ""}
     <div class="full"><label>Senha atual</label><input name="cur" type="password" autocomplete="current-password" required></div>
@@ -995,7 +1030,7 @@ function renderMe() {
   if (!isAdmin() && getEntity() !== "personal") { setEntity("personal"); entSel.value = "personal"; }
 }
 function showLogin() {
-  me = null; document.documentElement.dataset.auth = "out"; dlg.close();
+  me = null; document.documentElement.dataset.auth = "out"; dlg.close(); $("#mfa-form").hidden = true;
   root<{ needed: boolean }>("/auth/setup").then(r => {
     $("#setup-form").hidden = !r.needed; $("#login-form").hidden = r.needed;
     $<HTMLInputElement>(r.needed ? "#st-token" : "#lg-email").focus();
@@ -1027,10 +1062,29 @@ $("#login-form").addEventListener("submit", async e => {
   e.preventDefault();
   const f = new FormData(e.target as HTMLFormElement), err = $("#login-err"), btn = (e.target as HTMLFormElement).querySelector("button")!;
   err.textContent = ""; btn.disabled = true;
-  try { await enter(await root<Me>("/auth/login", { method: "POST", body: { email: str(f, "email"), password: String(f.get("password") ?? "") } })); (e.target as HTMLFormElement).reset(); }
+  try {
+    const r = await root<Me & { mfaRequired?: boolean; challenge?: string }>("/auth/login", { method: "POST", body: { email: str(f, "email"), password: String(f.get("password") ?? "") } });
+    (e.target as HTMLFormElement).reset();
+    if (r.mfaRequired) { mfaChallenge = r.challenge!; $("#login-form").hidden = true; $("#mfa-form").hidden = false; $("#mfa-err").textContent = ""; $<HTMLInputElement>("#mfa-code").focus(); }
+    else await enter(r);
+  }
   catch (x) { err.textContent = x instanceof ApiError ? x.message : "Sem conexão com o servidor."; }
   finally { btn.disabled = false; }
 });
+let mfaChallenge = "";
+$("#mfa-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const form = e.target as HTMLFormElement, err = $("#mfa-err"), btn = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+  err.textContent = ""; btn.disabled = true;
+  try {
+    const u = await root<Me>("/auth/login/mfa", { method: "POST", body: { challenge: mfaChallenge, code: str(new FormData(form), "code") } });
+    form.reset(); mfaChallenge = ""; $("#mfa-form").hidden = true; $("#login-form").hidden = false; await enter(u);
+  } catch (x) {
+    err.textContent = x instanceof ApiError ? x.message : "Sem conexão com o servidor.";
+    if (x instanceof ApiError && x.code === "MFA_EXPIRED") setTimeout(() => { $("#mfa-form").hidden = true; $("#login-form").hidden = false; }, 2500);
+  } finally { btn.disabled = false; }
+});
+$("#mfa-back").addEventListener("click", () => { mfaChallenge = ""; $("#mfa-form").hidden = true; $("#login-form").hidden = false; });
 $("#me").addEventListener("click", async e => {
   const a = (e.target as HTMLElement).closest<HTMLElement>("[data-act]")?.dataset.act;
   if (a === "password") changePassword(false);
@@ -1087,6 +1141,9 @@ view.addEventListener("click", async e => {
     else if (d.endsess) { if (confirm("Encerrar esta sessão? A pessoa terá que entrar de novo nesse aparelho.")) { await root(`/admin/sessions/${d.endsess}`, { method: "DELETE" }); toast("Sessão encerrada."); await render(); } }
     else if (d.edituser) editUser(d.edituser);
     else if (d.resetuser) resetUser(d.resetuser);
+    else if (d.reset2fa) { if (confirm("Desligar a verificação em duas etapas desta pessoa? Use quando ela perdeu o celular. Ela vai entrar só com a senha e poderá ativar de novo.")) { await root(`/admin/users/${d.reset2fa}/reset-2fa`, { method: "POST" }); toast("Verificação em duas etapas desligada."); await render(); } }
+    else if (d.mfaon !== undefined) await mfaSetup();
+    else if (d.mfaoff !== undefined) mfaDisable();
     else if (d.toggleuser) { await root(`/admin/users/${d.toggleuser}`, { method: "PATCH", body: { active: d.active !== "true" } }); toast(d.active === "true" ? "Usuário desativado." : "Usuário reativado."); await render(); }
     else if (d.editperson) editPerson(d.editperson);
     else if (d.toggleperson) { await api(`/people/${d.toggleperson}`, { method: "PATCH", body: { active: d.active !== "true" } }); await render(); }

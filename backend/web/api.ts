@@ -23,7 +23,7 @@ try { entity = localStorage.getItem("entity") ?? "personal"; } catch { /* sem st
 export const getEntity = () => entity;
 export function setEntity(e: string) { entity = e; try { localStorage.setItem("entity", e); } catch { /* ok */ } }
 
-export interface Me { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; }
+export interface Me { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; totpEnabled?: boolean; }
 
 type Init = { method?: string; body?: unknown; headers?: Record<string, string> };
 async function request<T>(url: string, init: Init = {}): Promise<T> {
