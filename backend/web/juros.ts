@@ -21,3 +21,16 @@ export function calcJuros(pvCents: number, n: number, pmtCents: number | null, r
   }
   return out;
 }
+
+/** Tabela de parcelas: quanto de cada parcela é juros e quanto abate da dívida. */
+export function schedule(pvCents: number, i: number, n: number, pmtCents: number) {
+  const rows: { no: number; pmtCents: number; interestCents: number; principalCents: number; balanceCents: number }[] = [];
+  let bal = pvCents;
+  for (let k = 1; k <= n; k++) {
+    const interest = bal * i, last = k === n;
+    const principal = last ? bal : pmtCents - interest;
+    bal = last ? 0 : bal - principal;
+    rows.push({ no: k, pmtCents: Math.round(last ? principal + interest : pmtCents), interestCents: Math.round(interest), principalCents: Math.round(principal), balanceCents: Math.max(0, Math.round(bal)) });
+  }
+  return rows;
+}

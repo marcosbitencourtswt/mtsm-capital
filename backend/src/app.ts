@@ -6,6 +6,7 @@ import * as auth from "./auth.js";
 import * as conduct from "./conduct.js";
 import * as admin from "./admin.js";
 import * as accounts from "./accounts.js";
+import * as contacts from "./contacts.js";
 import * as push from "./push.js";
 import * as statement from "./statement.js";
 import * as budget from "./budget.js";
@@ -434,6 +435,11 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   });
   // Bancos, cartões e empréstimos
   v1.get("/:entity/debts/summary", async c => c.json(await accounts.debtSummary(db, c.get("entity"), asOf(c))));
+  const contactIn = z.object({ name: text(80), kind: z.enum(["EMPRESA", "PESSOA"]).optional(), email: z.string().trim().max(120).email().nullable().optional().or(z.literal("")),
+    phone: z.string().trim().max(30).nullable().optional(), notes: z.string().trim().max(300).nullable().optional() }).strict();
+  v1.get("/:entity/contacts", async c => c.json(await contacts.listContacts(db, c.get("entity"), asOf(c))));
+  v1.post("/:entity/contacts", async c => c.json(await contacts.createContact(db, c.get("entity"), await body(c, contactIn)), 201));
+  v1.patch("/:entity/contacts/:id", async c => c.json(await contacts.updateContact(db, c.get("entity"), param(c, "id"), await body(c, contactIn.partial()))));
   v1.get("/:entity/accounts", async c => c.json(await accounts.listAccounts(db, c.get("entity"), asOf(c))));
   v1.post("/:entity/accounts", async c => c.json(await accounts.createAccount(db, c.get("entity"), c.get("user"), await body(c, accountCreate)), 201));
   v1.patch("/:entity/accounts/:id", async c => c.json(await accounts.updateAccount(db, c.get("entity"), param(c, "id"), await body(c, accountPatch))));

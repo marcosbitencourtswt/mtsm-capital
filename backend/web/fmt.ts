@@ -16,6 +16,14 @@ export function parseMoney(input: string): number {
 export const moneyInput = (cents: number) => (cents / 100).toFixed(2).replace(".", ",");
 
 export const today = () => new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+/** "vence hoje", "faltam 3 dias", "atrasada há 2 dias" + classe do chip. */
+export function daysLeft(iso: string | null | undefined, now = today()): { txt: string; cls: string } | null {
+  if (!iso) return null;
+  const d = Math.round((Date.parse(`${iso.slice(0, 10)}T12:00:00Z`) - Date.parse(`${now}T12:00:00Z`)) / 86400000);
+  if (d < 0) return { txt: `atrasada há ${-d} dia${d === -1 ? "" : "s"}`, cls: "OVERDUE" };
+  if (d === 0) return { txt: "vence hoje", cls: "OVERDUE" };
+  return { txt: d === 1 ? "vence amanhã" : `faltam ${d} dias`, cls: d <= 5 ? "NO_VALUE" : "" };
+}
 export const br = (iso: string | null | undefined) => (iso ? iso.slice(0, 10).split("-").reverse().join("/") : "sem data");
 export const monthLabel = (ym: string) => {
   const [y, m] = ym.split("-").map(Number) as [number, number];

@@ -1,10 +1,10 @@
 /** Gerado ao separar a tela em módulos: pages/titles. */
 import { type Kind, api, type Title, ApiError, type Settlement, getEntity } from "../api.js";
 import { st, STATUS, NATURE, catLabel, mine, catOptions, personSelect, dlgForm, str, openDialog, centsOf, toast, $ } from "../core.js";
-import { esc, money, br, pct, moneyInput, today, parseMoney } from "../fmt.js";
+import { esc, money, br, pct, moneyInput, today, parseMoney, daysLeft } from "../fmt.js";
 import { type Acc, isCashAcc } from "./bancos.js";
 import { dt } from "./admin.js";
-import { expenseFields, submitExpense } from "./lancar.js";
+import { expenseFields, submitExpense, incomeFields, submitIncome } from "./lancar.js";
  // "" = todas, "none" = casa/geral, ou id
 /* ===================== Contas a pagar / receber ===================== */
 export async function titles(kind: Kind) {
@@ -31,6 +31,7 @@ export function titleItem(t: Title) {
       <span class="chip ${t.status}">${STATUS[t.status]}</span><span class="chip">${NATURE[t.nature]}</span><span class="chip">${esc(catLabel(t.category))}</span>
       ${t.personName ? `<span class="chip person">👤 ${esc(t.personName)}</span>` : ""}
       <span class="muted">vence ${br(t.dueDate)}</span>
+      ${t.status !== "SETTLED" ? ((d) => (d ? `<span class="chip ${d.cls}">⏳ ${d.txt}</span>` : ""))(daysLeft(t.dueDate)) : ""}
       ${t.rateBp ? `<span class="chip">${pct(t.rateBp)} juros</span>` : ""}
       ${t.recurrenceId ? `<span class="chip">automática</span>` : ""}
     </div>
@@ -90,19 +91,13 @@ export async function newTitle(kind: Kind) {
       "Salvar", async f => { const r = await submitExpense(f); toast(r.msg, r.warn); });
     return;
   }
-  openDialog("Nova conta a receber", titleForm(kind), "Salvar", async f => {
-    const nat = str(f, "nat"), int = interestFrom(f);
-    const body: Record<string, unknown> = {
-      kind, nature: nat, counterparty: str(f, "who"), category: str(f, "cat"),
-      amountCents: centsOf(f, "v", false) ?? 0, dueDate: str(f, "due") || null, notes: str(f, "notes") || null,
-      personId: str(f, "person") || null,
-    };
-    if (nat === "DEBT") Object.assign(body, int);
-    if (nat === "LOAN_IN") body.loan = { ...int, dueDate: str(f, "due") || null };
-    await api("/titles", { method: "POST", body });
-    toast(nat === "LOAN_IN" ? "Empréstimo lançado e dívida criada em A pagar." : "Conta lançada.");
-  });
-  wireInterestVisibility(kind);
+  if (kind === "RECEIVABLE") {
+    const accs = await api<Acc[]>("/accounts").catch(() => [] as Acc[]);
+    openDialog("Nova receita ou conta a receber", `${incomeFields(accs, { later: true })}
+      <p class="muted full">Pegou dinheiro emprestado? Não é receita: cadastre em <b>Bancos e dívidas</b> → Empréstimo (o app calcula os juros).</p>`,
+      "Salvar", async f => { toast(await submitIncome(f)); });
+    return;
+  }
 }
 
 export async function editTitle(id: string) {

@@ -68,6 +68,34 @@ try {
   await adm.click("#juros button");
   const jt = await adm.textContent("#juros-out");
   check(!!jt && jt.includes("2,92%") && /Economia de cerca de/.test(jt), "calculadora de juros acha a taxa e a economia");
+  check(await adm.locator("#juros-out details tr").count() === 13, "calculadora mostra a tabela das parcelas");
+
+  // receita: "ainda vou receber" vira conta a receber
+  await adm.goto(`${U}/#painel`); await adm.reload(); await adm.waitForSelector("#quick-in");
+  await adm.selectOption("#quick-in [name=src]", "later");
+  check(await adm.isVisible("#quick-in [data-due]"), "receita: data prevista aparece quando ainda vai receber");
+  await adm.fill("#quick-in [name=v]", "300,00"); await adm.fill("#quick-in [name=d]", "Receita Futura E2E"); await adm.fill("#quick-in [name=due]", "2030-02-10");
+  await adm.click("#quick-in button"); await adm.waitForTimeout(600);
+  const rec = await adm.evaluate(async () => (await (await fetch("/api/v1/personal/titles?kind=RECEIVABLE&status=open")).json()).find((t: { counterparty: string }) => t.counterparty === "Receita Futura E2E"));
+  check(rec?.openCents === 30000 && rec?.dueDate === "2030-02-10", "ainda vou receber vira conta a receber");
+
+  // credor pessoa + empréstimo com juros calculado sozinho
+  await adm.goto(`${U}/#bancos`); await adm.reload(); await adm.waitForSelector("[data-newcontact]");
+  await adm.click("[data-newcontact]"); await adm.fill("#dlg [name=name]", "Credor E2E"); await adm.click("#dlg button[type=submit]");
+  await adm.waitForFunction(() => document.getElementById("view")!.innerText.includes("Credor E2E"));
+  await adm.click("[data-newacc]"); await adm.selectOption("#dlg [name=type]", "LOAN");
+  await adm.fill("#dlg [name=inst]", "Credor E2E"); await adm.fill("#dlg [name=name]", "Empréstimo E2E");
+  await adm.fill("#dlg [name=inst_v]", "100,00"); await adm.fill("#dlg [name=rem]", "12"); await adm.fill("#dlg [name=tot]", "12");
+  await adm.fill("#dlg [name=first]", "2030-03-10"); await adm.fill("#dlg [name=recv]", "1.000,00");
+  const hint = await adm.textContent("#dlg [data-ratehint]");
+  check(!!hint && hint.includes("2,92% ao mês"), "empréstimo: juros calculado ao digitar");
+  await adm.click("#dlg button[type=submit]"); await adm.waitForTimeout(700);
+  const loan = await adm.evaluate(async () => (await (await fetch("/api/v1/personal/accounts")).json()).find((a: { name: string }) => a.name === "Empréstimo E2E"));
+  check(loan?.monthlyRateBp === 292 && /Calculado/.test(loan?.rateSource ?? "") && loan?.institution === "Credor E2E", "empréstimo salvo com a taxa calculada e o credor");
+  const cr = await adm.evaluate(async () => (await (await fetch("/api/v1/personal/contacts")).json()).find((c: { name: string }) => c.name === "Credor E2E"));
+  check(cr?.openCents === 120000 && cr?.kind === "PESSOA" && cr?.nextDue === "2030-03-10", "credor mostra quanto falta e a próxima parcela");
+  await adm.reload(); await adm.waitForSelector("[data-newcontact]");
+  check(/faltam \d+ dias/.test(await adm.innerText("#view")), "mostra quantos dias faltam");
 
   // todas as telas abrem sem erro
   for (const t of ["painel", "pedidos", "combinados", "bancos", "pagar", "receber", "extrato", "indicadores", "ranking", "pessoas", "futuro", "admin", "config"]) {

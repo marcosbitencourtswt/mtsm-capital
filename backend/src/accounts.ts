@@ -123,6 +123,11 @@ async function openPayables(db: Db, e: Entity): Promise<(OpenTitle & { open: num
   }).filter(r => r.open > 0);
 }
 
+/** Próxima parcela em aberto (a mais antiga) e quantos dias faltam (negativo = atrasada). */
+function nextOf(linked: { due_date: string | null; open: number }[], asOf: string) {
+  const n = linked.filter(t => t.due_date).sort((a, b) => a.due_date!.localeCompare(b.due_date!))[0];
+  return n ? { nextDueDate: n.due_date, nextDueCents: n.open, daysToNext: daysBetween(asOf, n.due_date!) } : { nextDueDate: null, nextDueCents: null, daysToNext: null };
+}
 export async function listAccounts(db: Db, e: Entity, asOf = todaySP()) {
   const accounts = (await db.query(`SELECT a.*, a.opening_date::text AS opening_date_s, i.name AS institution, p.name AS owner_name
     FROM account a LEFT JOIN institution i ON i.id = a.institution_id LEFT JOIN person p ON p.id = a.owner_person_id
@@ -150,6 +155,7 @@ export async function listAccounts(db: Db, e: Entity, asOf = todaySP()) {
       availableLimitCents: a.type === "CARD" && a.credit_limit_cents != null ? Number(a.credit_limit_cents) - openCents : null,
       overdueCents: overdue.reduce((s, t) => s + t.open, 0), overdueCount: overdue.length,
       maxDaysOverdue: overdue.reduce((m, t) => Math.max(m, daysBetween(t.due_date!, asOf)), 0),
+      ...nextOf(linked, asOf),
     };
   });
 }

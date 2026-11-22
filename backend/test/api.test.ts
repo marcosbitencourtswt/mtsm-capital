@@ -1254,3 +1254,24 @@ describe("Cópia de segurança sob demanda", () => {
     await back.end();
   });
 });
+
+describe("Credores (pessoas de fora da família)", () => {
+  it("cadastra credor pessoa, liga ao empréstimo e mostra quanto falta e a próxima parcela", async () => {
+    const c = await req("POST", `${P}/contacts`, { name: "Credor Amigo", kind: "PESSOA", phone: "61 90000-0000", email: "amigo@exemplo.com" });
+    expect(c.status).toBe(201);
+    expect((await req("POST", `${P}/contacts`, { name: "credor amigo" })).status).toBe(409);
+    expect((await req("POST", `${P}/contacts`, { name: "X", email: "nao-e-email" })).status).toBe(400);
+    const due = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+    const acc = await req("POST", `${P}/accounts`, { type: "LOAN", name: "Empréstimo", institution: "Credor Amigo", monthlyRateBp: 292,
+      loan: { installmentCents: 10000, remaining: 3, totalInstallments: 12, firstOpenDueDate: due } });
+    expect(acc.status).toBe(201);
+    const list = (await req("GET", `${P}/contacts`)).json as { id: string; name: string; kind: string; openCents: number; openCount: number; nextDue: string; daysToNext: number }[];
+    const me = list.find(x => x.name === "Credor Amigo")!;
+    expect(me).toMatchObject({ kind: "PESSOA", openCents: 30000, openCount: 3, nextDue: due });
+    expect(me.daysToNext).toBeGreaterThanOrEqual(9);
+    const a = ((await req("GET", `${P}/accounts`)).json as { id: string; nextDueDate: string; nextDueCents: number }[]).find(x => x.id === acc.json.id)!;
+    expect(a).toMatchObject({ nextDueDate: due, nextDueCents: 10000 });
+    expect((await req("PATCH", `${P}/contacts/${c.json.id}`, { email: "", notes: "emprestou em 2026" })).status).toBe(200);
+    expect(((await req("GET", `${P}/contacts`)).json as { id: string; email: string | null }[]).find(x => x.id === c.json.id)!.email).toBeNull();
+  });
+});

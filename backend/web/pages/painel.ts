@@ -9,7 +9,7 @@ import { type PReq } from "./pedidos.js";
 import { esc, money, today, br, pct } from "../fmt.js";
 import { pjCards } from "./pj.js";
 import { receiptCard } from "./cupons.js";
-import { expenseFields } from "./lancar.js";
+import { expenseFields, incomeFields } from "./lancar.js";
 
 /* ===================== Painel ===================== */
 export interface Dashboard {
@@ -30,7 +30,6 @@ export async function painel() {
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
   const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
   const cardOpts = live.filter(a => a.type === "CARD").map(a => `<option value="card:${a.id}">Cartão ${accLabel(a)}</option>`).join("");
-  const cameIn = `<div><label>Entrou em</label><select name="src"><option value="">Não informar</option>${cashOpts}</select></div>`;
   const trOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="${a.id}">${accLabel(a)}</option>`).join("");
   const kpi = (l: string, v: number, cls = "", hero = false) => `<div class="card kpi${hero ? " hero" : ""}"><div class="l">${l}</div><div class="v ${cls}">${money(v)}</div></div>`;
   const m = d.thisMonth;
@@ -58,14 +57,9 @@ export async function painel() {
     </form>
   </div>
   <div class="card">
-    <h3>Já recebi</h3>
+    <h3>Lançar receita</h3>
     <form class="form" id="quick-in">
-      <div><label>Valor (R$)</label><input name="v" inputmode="decimal" placeholder="0,00" required></div>
-      <div><label>De quê</label><input name="d" placeholder="ex.: escova, venda de cosmético" required></div>
-      <div><label>Tipo</label><select name="c"><option value="SERVICOS">Serviço</option><option value="VENDAS">Venda</option><option value="RENDA">Renda</option><option value="OUTROS">Outros</option></select></div>
-      <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
-      ${personSelect(st.me?.personId)}
-      ${cameIn}
+      ${incomeFields(accs)}
       <div><button>Registrar</button></div>
     </form>
   </div>

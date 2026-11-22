@@ -1,6 +1,6 @@
 import { painel } from "./pages/painel.js";
 import { adminPage, newUser, editUser, resetUser, downloadBackup } from "./pages/admin.js";
-import { bancosPage, newAccount, editAccount, billDialog, editTransfer, transferDialog } from "./pages/bancos.js";
+import { bancosPage, newAccount, editAccount, billDialog, editTransfer, transferDialog, newContact, editContact } from "./pages/bancos.js";
 import { combinadosPage, infractionDialog, blameDialog, planDialog, closeDialog, settleDialog, editRule } from "./pages/combinados.js";
 import { pedidosPage, type PReq } from "./pages/pedidos.js";
 import { indicadoresPage } from "./pages/indicadores.js";
@@ -9,7 +9,7 @@ import { titles, newTitle, editTitle, payTitle, showPays, editPay } from "./page
 import { pessoas, newPerson, editPerson } from "./pages/pessoas.js";
 import { extrato } from "./pages/extrato.js";
 import { futuro, runSim } from "./pages/futuro.js";
-import { submitExpense, runJuros } from "./pages/lancar.js";
+import { submitExpense, submitIncome, runJuros } from "./pages/lancar.js";
 import { config, newRec, editRec } from "./pages/config.js";
 import { $, st, loadPeople, view, openDialog, str, dlg, toast, dlgForm, isAdmin, fail, centsOf } from "./core.js";
 import { resetCharts, paintCharts, wireTooltips } from "./charts.js";
@@ -216,7 +216,9 @@ view.addEventListener("click", async e => {
     else if (d.check) { await api("/conduct/checks", { method: "POST", body: { personId: d.person, ruleId: d.check, day: d.day, checked: d.val === "true" } }); await render(); }
     else if (d.cbweek !== undefined) { const n = Number(d.cbweek); if (n === 0) st.cbDate = today(); else { const x = new Date(`${st.cbDate}T12:00:00`); x.setDate(x.getDate() + n); st.cbDate = x.toLocaleDateString("sv-SE"); } await render(); }
     else if (d.infraction !== undefined) await infractionDialog();
-    else if (d.newacc !== undefined) newAccount();
+    else if (d.newacc !== undefined) await newAccount();
+    else if (d.newcontact !== undefined) newContact();
+    else if (d.editcontact) await editContact(d.editcontact);
     else if (d.editacc) await editAccount(d.editacc);
     else if (d.bill) billDialog(d.bill);
     else if (d.edittr) await editTransfer(d.edittr);
@@ -307,10 +309,7 @@ view.addEventListener("submit", async e => {
       const months = Number(str(new FormData(form), "m"));
       await root("/admin/audit/retention", { method: "PUT", body: { months } }); toast(months ? `Registro guardado por ${months} ${months === 1 ? "mês" : "meses"}.` : "Registro guardado sem limite."); await render();
     } else if (form.id === "quick-in") {
-      const f = new FormData(form);
-      const src = srcOf(f);
-      await api("/incomes/quick", { method: "POST", body: { amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null, accountId: src.accountId ?? null } });
-      toast("Recebimento registrado."); await render();
+      toast(await submitIncome(new FormData(form))); await render();
     } else if (form.id === "ext") {
       const f = new FormData(form); st.extFrom = str(f, "from") || st.extFrom; st.extTo = str(f, "to") || st.extTo;
       if (st.extFrom > st.extTo) [st.extFrom, st.extTo] = [st.extTo, st.extFrom];

@@ -8,7 +8,7 @@ import { api } from "../api.js";
 import { st, catOptions, personSelect, str, centsOf, $ } from "../core.js";
 import { esc, money, today } from "../fmt.js";
 import { type Acc, isCashAcc } from "./bancos.js";
-import { calcJuros } from "../juros.js";
+import { calcJuros, schedule } from "../juros.js";
 
 const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
 
@@ -53,6 +53,35 @@ export async function submitExpense(f: FormData): Promise<{ msg: string; warn: b
   return { msg: "cardAccountId" in via ? "Gasto registrado na fatura do cartão." : "Gasto registrado.", warn: false };
 }
 
+/* ===================== Lançar receita (mesma ideia) ===================== */
+const INCOME_CATS: [string, string][] = [["SERVICOS", "Serviço"], ["VENDAS", "Venda"], ["RENDA", "Renda / salário"], ["OUTROS", "Outros"]];
+export function incomeFields(accs: Acc[], o: { later?: boolean } = {}) {
+  const cash = accs.filter(a => a.active && isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
+  const later = !!o.later, hide = (h: boolean) => (h ? ` style="display:none"` : "");
+  return `
+    <div><label>Valor (R$)</label><input name="v" inputmode="decimal" placeholder="0,00" required></div>
+    <div><label>De quê / de quem</label><input name="d" placeholder="ex.: salário, escova, venda" maxlength="120" required></div>
+    <div class="full"><label>Recebimento</label><select name="src" data-src>
+      <option value="later" ${later ? "selected" : ""}>Ainda vou receber (vai para Contas a receber)</option>
+      <optgroup label="Já recebi em">${cash}<option value="" ${later ? "" : "selected"}>Já recebi (não informar a conta)</option></optgroup>
+    </select></div>
+    <div data-paid${hide(later)}><label>Data</label><input name="dt" type="date" value="${today()}"></div>
+    <div data-due${hide(!later)}><label>Previsto para</label><input name="due" type="date"></div>
+    <div><label>Tipo</label><select name="c">${INCOME_CATS.map(([v, l]) => `<option value="${v}" ${v === (later ? "RENDA" : "SERVICOS") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+    ${personSelect(st.me?.personId ?? null)}`;
+}
+export async function submitIncome(f: FormData): Promise<string> {
+  const src = str(f, "src"), personId = str(f, "person") || null;
+  if (src === "later") {
+    await api("/titles", { method: "POST", body: { kind: "RECEIVABLE", nature: "INCOME", counterparty: str(f, "d"), category: str(f, "c"),
+      amountCents: centsOf(f, "v"), dueDate: str(f, "due") || null, personId } });
+    return "Lançado em Contas a receber.";
+  }
+  await api("/incomes/quick", { method: "POST", body: { amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"),
+    date: str(f, "dt") || undefined, personId, accountId: src.startsWith("acc:") ? src.slice(4) : null } });
+  return "Recebimento registrado.";
+}
+
 /* ===================== Calculadora de juros ===================== */
 export function jurosCard() {
   return `<div class="card"><h3>Calculadora de juros</h3>
@@ -88,5 +117,9 @@ export function runJuros(form: HTMLFormElement) {
     <p class="muted">Você paga ${money(r.totalCents)} por ${money(pv)} recebidos.${r.rateMonth === 0 ? " Sem juros." : ""}</p>
     ${r.payoff ? `<div class="alert"><b>Quitar hoje as ${r.payoff.left} parcelas que faltam:</b> deveria custar perto de ${money(r.payoff.todayCents)}
       (em vez de ${money(r.payoff.nominalCents)}). Economia de cerca de <b>${money(r.payoff.savedCents)}</b>. Peça o valor exato ao credor: a lei garante desconto dos juros ao antecipar.</div>` : ""}
+    <details><summary>Ver a tabela das ${n} parcelas</summary><div class="scroll"><table>
+      <tr><th>Nº</th><th>Parcela</th><th>Juros</th><th>Abate da dívida</th><th>Falta</th></tr>
+      ${schedule(pv, r.rateMonth, n, r.pmtCents).map(x => `<tr><td>${x.no}</td><td>${money(x.pmtCents)}</td><td class="neg">${money(x.interestCents)}</td><td>${money(x.principalCents)}</td><td>${money(x.balanceCents)}</td></tr>`).join("")}
+    </table></div></details>
     <p class="muted">Estimativa (tabela Price). O valor do contrato pode variar com IOF, seguros e tarifas.</p>`;
 }
