@@ -126,8 +126,15 @@ export async function commitStatement(db: Db, e: Entity, u: SessionUser, account
   for (const r of rows) {
     if (done.has(r.fitid)) { out.jaImportados++; continue; }
     const abs = Math.abs(r.amountCents);
+    // 1) Reserva a movimentação (FITID único por conta): dois envios do mesmo arquivo não lançam duas vezes.
+    const res = await db.query(`INSERT INTO bank_txn (account_id, fitid, posted_on, amount_cents, memo, memo_key, action, category, person_id, created_by)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (account_id, fitid) DO NOTHING RETURNING id`,
+      [accountId, r.fitid, r.date, r.amountCents, r.memo, memoKey(r.memo) || null, r.action, r.action === "despesa" || r.action === "receita" ? r.category || null : null,
+       r.personId ?? null, u.id]);
+    if (!res.rowCount) { out.jaImportados++; continue; }
+    const txnId = res.rows[0].id as string;
+    let titleId: string | null = null, transferId: string | null = null;
     try {
-      let titleId: string | null = null, transferId: string | null = null;
       if (r.action === "despesa") {
         const t = await quickExpense(db, e, { amountCents: abs, category: r.category || "OUTROS", description: r.memo, date: r.date, personId: r.personId ?? acc.owner_person_id,
           createdBy: u.id, ...(card ? { cardAccountId: accountId } : { accountId }) });
@@ -135,18 +142,20 @@ export async function commitStatement(db: Db, e: Entity, u: SessionUser, account
       } else if (r.action === "receita") {
         const t = await createTitle(db, e, { kind: "RECEIVABLE", nature: "INCOME", counterparty: r.memo, category: r.category || "RENDA", amountCents: abs, dueDate: r.date,
           personId: r.personId ?? acc.owner_person_id, createdBy: u.id });
+        titleId = t.id;
         await createSettlement(db, e, t.id, { amountCents: abs, paidOn: r.date, createdBy: u.id, accountId });
-        titleId = t.id; out.receitas++;
+        out.receitas++;
       } else if (r.action === "transferencia") {
         if (!r.toAccountId) throw new AppError(422, "NO_TARGET", "Escolha a conta de destino.");
         const [fromId, toId] = r.amountCents < 0 ? [accountId, r.toAccountId] : [r.toAccountId, accountId];
         transferId = (await createTransfer(db, e, u, { fromAccountId: fromId, toAccountId: toId, amountCents: abs, day: r.date, note: r.memo })).id; out.transferencias++;
       } else out.ignorados++;
-      await db.query(`INSERT INTO bank_txn (account_id, fitid, posted_on, amount_cents, memo, memo_key, action, category, person_id, title_id, transfer_id, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (account_id, fitid) DO NOTHING`,
-        [accountId, r.fitid, r.date, r.amountCents, r.memo, memoKey(r.memo) || null, r.action, r.action === "despesa" || r.action === "receita" ? r.category || null : null,
-         r.personId ?? null, titleId, transferId, u.id]);
+      // 2) Liga a movimentação ao que foi lançado.
+      await db.query("UPDATE bank_txn SET title_id = $2, transfer_id = $3 WHERE id = $1", [txnId, titleId, transferId]);
     } catch (err) {
+      // 3) Falhou no meio: desfaz o que tiver sido criado e libera a reserva para tentar de novo.
+      if (titleId) await db.query("UPDATE title SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL", [titleId]).catch(() => {});
+      await db.query("DELETE FROM bank_txn WHERE id = $1", [txnId]).catch(() => {});
       out.erros.push({ memo: `${r.date.split("-").reverse().join("/")} ${r.memo}`, erro: err instanceof AppError ? err.message : (err as Error).message });
     }
   }

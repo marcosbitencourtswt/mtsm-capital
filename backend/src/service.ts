@@ -142,7 +142,13 @@ async function accountOf(q: Q, e: Entity, id: string | null | undefined): Promis
   return id;
 }
 
+/** Pagamento numa transação só: valor "a definir", fatura do cartão, pagamento e desconto gravam juntos ou nada grava. */
 export async function createSettlement(db: Db, e: Entity, titleId: string, i: SettlementInput, idemKey?: string, asOf = todaySP()) {
+  return withTx(db, c => createSettlementTx(c, e, titleId, i, idemKey, asOf));
+}
+async function createSettlementTx(db: Tx, e: Entity, titleId: string, i: SettlementInput, idemKey?: string, asOf = todaySP()) {
+  // Trava a conta: dois aparelhos pagando ao mesmo tempo não passam juntos do saldo em aberto.
+  await db.query("SELECT 1 FROM title WHERE id = $1 AND entity_code = $2 FOR UPDATE", [titleId, e]);
   if (idemKey) {
     const prev = await db.query("SELECT title_id FROM settlement WHERE idempotency_key = $1", [idemKey]);
     if (prev.rowCount) return { duplicate: true, title: await getTitle(db, e, prev.rows[0].title_id, asOf) };

@@ -1040,3 +1040,32 @@ describe("Importar contas automáticas", () => {
     expect((await req("POST", `${P}/import/accounts`, file)).json.rows[0].status).toBe("ja_existe");
   });
 });
+
+describe("Consistência (nada pela metade)", () => {
+  it("dois toques simultâneos com a mesma chave gravam um pagamento só", async () => {
+    const d = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+    const t = (await req("POST", `${P}/titles`, { kind: "PAYABLE", nature: "EXPENSE", counterparty: "Conta toque duplo", category: "OUTROS", amountCents: 5000, dueDate: d })).json;
+    const key = `k-${Math.random()}`;
+    const [a, b] = await Promise.all([1, 2].map(() => req("POST", `${P}/titles/${t.id}/settlements`, { amountCents: 5000, paidOn: d }, { "idempotency-key": key })));
+    expect([a!.status, b!.status].sort()).toEqual([200, 201]);
+    expect((await req("GET", `${P}/titles/${t.id}`)).json.settlements).toHaveLength(1);
+  });
+
+  it("importação que falha numa linha não deixa conta órfã e permite tentar de novo", async () => {
+    const login = async (email: string, pw: string) => ((await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password: pw }) })).headers.get("set-cookie") ?? "").split(";")[0]!;
+    await createUser(db, { email: "import-nr@familia.test", name: "Import NR", role: "ADMIN", password: "frase-longa-import-12" });
+    const ck = await login("import-nr@familia.test", "frase-longa-import-12");
+    const conta = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta import falha", institution: "Banco IF", openingBalanceCents: 0 })).json;
+    const [y, m] = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" }).split("-").map(Number) as [number, number];
+    const old = new Date(Date.UTC(y, m - 3, 10)).toISOString().slice(0, 10); // mês já fechado
+    const rows = [{ fitid: "RF1", date: old, amountCents: 77700, memo: "RECEITA MES FECHADO", action: "receita", category: "RENDA" }];
+    const r = (await req("POST", `${P}/import/statement`, { accountId: conta.id, rows }, { cookie: ck })).json;
+    expect(r.receitas).toBe(0); expect(r.erros).toHaveLength(1);
+    expect(r.erros[0].erro).toContain("fechado");
+    const orphan = (await db.query("SELECT count(*)::int AS n FROM title WHERE counterparty = 'RECEITA MES FECHADO' AND deleted_at IS NULL")).rows[0].n;
+    expect(orphan).toBe(0);
+    expect((await db.query("SELECT count(*)::int AS n FROM bank_txn WHERE account_id = $1", [conta.id])).rows[0].n).toBe(0);
+    // o root consegue importar a mesma linha depois
+    expect((await req("POST", `${P}/import/statement`, { accountId: conta.id, rows })).json.receitas).toBe(1);
+  });
+});
