@@ -93,16 +93,18 @@ export async function audit(db: Db, f: AuditFilter) {
 
 /** Retenção: tira do banco registros mais velhos que N meses (o backup diário guarda as cópias). */
 export async function pruneAudit(db: Db, months: number) {
+  if (!months) return 0;
   const r = await db.query("DELETE FROM audit_log WHERE at < now() - make_interval(months => $1)", [months]);
   return r.rowCount ?? 0;
 }
 
-export const RETENTION_DEFAULT = 12;
+/** 0 = sem limite (padrão): o registro é pequeno (~3 MB/ano) e o sistema é para a vida toda. */
+export const RETENTION_DEFAULT = 0;
 /** Meses que o registro de alterações fica no banco (configuração da família, na entidade pessoal). */
 export async function getRetention(db: Db): Promise<number> {
   const r = await db.query("SELECT value FROM setting WHERE entity_code = 'PERSONAL' AND key = 'audit_retention_months'");
   const v = Number(r.rows[0]?.value);
-  return Number.isInteger(v) && v >= 1 ? v : RETENTION_DEFAULT;
+  return Number.isInteger(v) && v >= 0 ? v : RETENTION_DEFAULT;
 }
 export async function setRetention(db: Db, months: number) {
   await db.query(`INSERT INTO setting (entity_code, key, value) VALUES ('PERSONAL', 'audit_retention_months', to_jsonb($1::int))

@@ -2,14 +2,20 @@
 # Segredos necessários (GitHub → Settings → Secrets and variables → Actions):
 #   NEON_DATABASE_URL  string de conexão do Neon (de preferência um usuário só-leitura)
 #   BACKUP_PASSPHRASE  senha longa para criptografar; guarde fora do GitHub (sem ela o backup não abre)
+# Diário: guardado 30 dias (artefato). Dia 1º: cópia mensal PERMANENTE como anexo de uma versão (Release) privada do repositório.
 # Restaurar:  gpg -d mtsm-AAAA-MM-DD.dump.gpg > mtsm.dump && pg_restore --no-owner -d "<url destino>" mtsm.dump
 name: backup-diario
 on:
   schedule:
-    - cron: "41 6 * * *"   # 03:41 em Brasília
-  workflow_dispatch: {}
+    - cron: "41 6 * * *"   # 03:41 em Brasília, todo dia
+  workflow_dispatch:
+    inputs:
+      mensal:
+        description: "Também guardar como cópia mensal permanente"
+        type: boolean
+        default: false
 permissions:
-  contents: read
+  contents: write   # necessário só para criar a versão com a cópia mensal
 jobs:
   backup:
     runs-on: ubuntu-latest
@@ -46,3 +52,15 @@ jobs:
           path: ${{ env.ARQ }}
           retention-days: 30
           if-no-files-found: error
+      - name: Cópia mensal permanente (dia 1º)
+        if: ${{ inputs.mensal || (github.event_name == 'schedule' && startsWith(env.ARQ, 'mtsm-') && contains(env.ARQ, '-01.dump')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="fechamento-$(TZ=America/Sao_Paulo date -d yesterday +%Y-%m)"   # dia 1º guarda o mês que acabou de fechar
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARQ" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$ARQ" --repo "$GITHUB_REPOSITORY" --title "Backup $TAG" --notes "Cópia mensal criptografada (AES-256). Abrir: gpg -d ARQUIVO > mtsm.dump"
+          fi

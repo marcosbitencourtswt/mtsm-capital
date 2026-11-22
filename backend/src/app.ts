@@ -52,7 +52,7 @@ const personPatch = personCreate.partial().strict();
 const loginInput = z.object({ email: z.string().trim().max(200), password: z.string().min(1).max(200) }).strict();
 const passwordInput = z.object({ current: z.string().min(1).max(200), next: z.string().max(200) }).strict();
 const userCreate = z.object({ email: z.email().max(200), name: text(80), nickname: z.string().trim().max(30).nullable().optional(),
-  role: z.enum(["ADMIN", "MEMBER"]).optional(), personId: personRef, isGuardian: z.boolean().optional(), password: z.string().max(200) }).strict();
+  role: z.enum(["ADMIN", "MEMBER"]).optional(), personId: personRef, isGuardian: z.boolean().optional(), conductOnly: z.boolean().optional(), password: z.string().max(200) }).strict();
 const userPatch = userCreate.partial().extend({ active: z.boolean().optional() }).strict();
 const ruleCreate = z.object({ kind: z.enum(["HABIT", "INFRACTION"]), name: text(80), points: z.number().int().min(0).max(1000).optional(),
   fineCents: z.number().int().min(0).max(100000000).optional(), sort: z.number().int().min(0).max(999).optional(), active: z.boolean().optional(),
@@ -153,6 +153,10 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     return c.json({ recurrences: out, auditPruned: pruned });
   });
 
+  const CONDUCT_ONLY_ALLOWED: [string, RegExp][] = [
+    ["GET", /^\/api\/v1\/auth\/me$/], ["POST", /^\/api\/v1\/auth\/password$/], ["POST", /^\/api\/v1\/auth\/2fa\/(setup|enable|disable)$/],
+    ["GET", /^\/api\/v1\/personal\/people$/], ["GET", /^\/api\/v1\/personal\/conduct\/(board|rules|allowance)$/], ["POST", /^\/api\/v1\/personal\/conduct\/checks$/],
+  ];
   /* ---- Login ---- */
   const clientIp = (c: Context) => (c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "").split(",")[0]!.trim() || undefined;
   const cookieOpts = (c: Context) => ({ httpOnly: true, sameSite: "Lax" as const, path: "/",
@@ -185,6 +189,9 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     const user = await auth.sessionUser(db, token);
     if (!user) throw new AppError(401, "UNAUTHENTICATED", "Faça login para continuar.");
     c.set("user", user); c.set("token", token!);
+    // Perfil "só combinados": lista fechada do que pode — o resto (finanças) é negado no servidor, não só escondido na tela.
+    if (user.conductOnly && !CONDUCT_ONLY_ALLOWED.some(([m, re]) => m === c.req.method && re.test(c.req.path)))
+      throw new AppError(403, "CONDUCT_ONLY", "Seu acesso é só aos combinados.");
     await actorStore.run(user.id, next); // gravações desta requisição levam o autor para o registro
   });
   const isAdmin = (c: Context<{ Variables: Vars }>) => c.get("user").role === "ADMIN";
@@ -221,7 +228,7 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.get("/admin/audit/retention", async c => { requireAdmin(c); return c.json({ months: await admin.getRetention(db) }); });
   v1.put("/admin/audit/retention", async c => {
     if (!c.get("user").isRoot) throw new AppError(403, "ROOT_ONLY", "Só o root muda a retenção do registro.");
-    return c.json(await admin.setRetention(db, (await body(c, z.object({ months: z.number().int().min(1).max(60) }).strict())).months));
+    return c.json(await admin.setRetention(db, (await body(c, z.object({ months: z.number().int().min(0).max(600) }).strict())).months));
   });
 
   /* ---- Entidade: Byte4Tech (PJ) só para o administrador ---- */
@@ -372,7 +379,10 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.get("/:entity/conduct/allowance", async c => {
     personal(c); const m = c.req.query("month") ?? todaySP().slice(0, 7);
     if (!isoMonth.safeParse(m).success) throw new AppError(400, "INVALID_PARAM", "month inválido (AAAA-MM).");
-    return c.json(await conduct.allowance(db, m));
+    const r = await conduct.allowance(db, m);
+    // "Só combinados" vê só a própria mesada (a dos outros adultos é finança da casa).
+    const u = c.get("user");
+    return c.json(u.conductOnly ? { ...r, people: r.people.filter((x: { personId: string }) => x.personId === u.personId) } : r);
   });
   v1.put("/:entity/conduct/allowance/plan/:personId", async c => c.json(await conduct.setPlan(db, personal(c), param(c, "personId"), await body(c, planInput))));
   v1.post("/:entity/conduct/allowance/close", async c => c.json(await conduct.closeMonth(db, personal(c), await body(c, closeInput)), 201));

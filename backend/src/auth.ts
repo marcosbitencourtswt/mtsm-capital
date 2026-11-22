@@ -35,8 +35,8 @@ export function validatePassword(pw: string) {
   if (/^(.)\1+$/.test(pw) || /^(\d+|(senha|password|mudar|trocar)\d*)$/i.test(pw)) throw new AppError(422, "WEAK_PASSWORD", "Senha fácil demais. Use uma frase ou misture palavras e números.");
 }
 
-export interface SessionUser { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; totpEnabled: boolean; }
-const USER_COLS = `u.id, u.email, u.name, u.nickname, u.role, u.person_id AS "personId", u.must_change_password AS "mustChangePassword", u.is_guardian AS "isGuardian", u.is_root AS "isRoot", (u.totp_secret IS NOT NULL) AS "totpEnabled"`;
+export interface SessionUser { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; totpEnabled: boolean; conductOnly: boolean; }
+const USER_COLS = `u.id, u.email, u.name, u.nickname, u.role, u.person_id AS "personId", u.must_change_password AS "mustChangePassword", u.is_guardian AS "isGuardian", u.is_root AS "isRoot", (u.totp_secret IS NOT NULL) AS "totpEnabled", u.conduct_only AS "conductOnly"`;
 
 const IP_MAX_FAILS = 20, IP_WINDOW_MIN = 15;
 /** Limite por endereço de rede: impede tentar muitas senhas (ou travar contas de outros) a partir do mesmo lugar. */
@@ -210,11 +210,11 @@ export async function changePassword(db: Db, userId: string, current: string, ne
 }
 
 /* ---------- Administração de usuários (só ADMIN) ---------- */
-const PUBLIC_COLS = `id, email, name, nickname, role, person_id AS "personId", is_guardian AS "isGuardian", is_root AS "isRoot", active, must_change_password AS "mustChangePassword", last_login_at AS "lastLoginAt", created_at AS "createdAt", (totp_secret IS NOT NULL) AS "totpEnabled"`;
+const PUBLIC_COLS = `id, email, name, nickname, role, person_id AS "personId", is_guardian AS "isGuardian", is_root AS "isRoot", active, must_change_password AS "mustChangePassword", last_login_at AS "lastLoginAt", created_at AS "createdAt", (totp_secret IS NOT NULL) AS "totpEnabled", conduct_only AS "conductOnly"`;
 export async function listUsers(db: Db) {
   return (await db.query(`SELECT ${PUBLIC_COLS} FROM app_user ORDER BY is_root DESC, role, name`)).rows;
 }
-export interface UserInput { email: string; name: string; nickname?: string | null; role?: "ADMIN" | "MEMBER"; personId?: string | null; isGuardian?: boolean; password: string; }
+export interface UserInput { email: string; name: string; nickname?: string | null; role?: "ADMIN" | "MEMBER"; personId?: string | null; isGuardian?: boolean; conductOnly?: boolean; password: string; }
 export type Actor = { id: string; isRoot: boolean };
 /** actor ausente = script de linha de comando (quem tem acesso ao banco já é dono do sistema). */
 export async function createUser(db: Db, i: UserInput, actor?: Actor) {
@@ -223,11 +223,12 @@ export async function createUser(db: Db, i: UserInput, actor?: Actor) {
   if (i.personId) await assertPersonPersonal(db, i.personId);
   try {
     const r = await db.query(
-      `INSERT INTO app_user (email, name, nickname, role, person_id, is_guardian, password_hash) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING ${PUBLIC_COLS}`,
-      [i.email.trim().toLowerCase(), i.name.trim(), i.nickname?.trim() || null, i.role ?? "MEMBER", i.personId ?? null, i.isGuardian ?? i.role === "ADMIN", await hashPassword(i.password)]);
+      `INSERT INTO app_user (email, name, nickname, role, person_id, is_guardian, conduct_only, password_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${PUBLIC_COLS}`,
+      [i.email.trim().toLowerCase(), i.name.trim(), i.nickname?.trim() || null, i.role ?? "MEMBER", i.personId ?? null, i.conductOnly ? false : i.isGuardian ?? i.role === "ADMIN", i.conductOnly ?? false, await hashPassword(i.password)]);
     return r.rows[0];
   } catch (e) {
     if ((e as { code?: string }).code === "23505") throw new AppError(409, "DUPLICATE", "Já existe usuário com esse e-mail ou ligado a essa pessoa.");
+    if ((e as { code?: string }).code === "23514") throw new AppError(422, "CONDUCT_ONLY", "\"Só combinados\" vale só para membro (não administrador nem responsável).");
     throw e;
   }
 }
@@ -250,10 +251,12 @@ export async function updateUser(db: Db, id: string, p: Partial<Omit<UserInput, 
   if (p.personId !== undefined) add("person_id", p.personId);
   if (p.active !== undefined) add("active", p.active);
   if (p.isGuardian !== undefined) add("is_guardian", p.isGuardian);
+  if (p.conductOnly !== undefined) add("conduct_only", p.conductOnly);
   if (p.password !== undefined) { validatePassword(p.password); add("password_hash", await hashPassword(p.password)); add("must_change_password", true); add("failed_attempts", 0); add("locked_until", null); }
   if (!sets.length) throw new AppError(400, "EMPTY", "Nada para alterar.");
   const r = await db.query(`UPDATE app_user SET ${sets.join(", ")} WHERE id = $1 RETURNING ${PUBLIC_COLS}`, [id, ...vals]).catch(e => {
     if ((e as { code?: string }).code === "23505") throw new AppError(409, "DUPLICATE", "Já existe usuário com esse e-mail ou ligado a essa pessoa.");
+    if ((e as { code?: string }).code === "23514") throw new AppError(422, "CONDUCT_ONLY", "\"Só combinados\" vale só para membro (não administrador nem responsável).");
     throw e;
   });
   if (!r.rowCount) throw new AppError(404, "USER_NOT_FOUND", "Usuário não encontrado.");

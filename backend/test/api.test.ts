@@ -705,7 +705,7 @@ describe("Registro de alterações e transferências", () => {
     expect((await req("GET", `/api/v1/admin/audit?area=transferencias&limit=5`)).json[0]).toMatchObject({ who: "Marcos", action: "excluiu" });
 
     // retenção: padrão 12 meses; só o root muda; o ciclo diário tira o que passou do prazo
-    expect((await req("GET", "/api/v1/admin/audit/retention")).json.months).toBe(12);
+    expect((await req("GET", "/api/v1/admin/audit/retention")).json.months).toBe(0);
     await db.query("UPDATE app_user SET is_root = true WHERE email = 'admin@familia.test'");
     expect((await req("PUT", "/api/v1/admin/audit/retention", { months: 2 })).json.months).toBe(2);
     await db.query("INSERT INTO audit_log (table_name, row_id, action, at) VALUES ('title', 'velho', 'INSERT', now() - interval '3 months')");
@@ -739,5 +739,28 @@ describe("Importar cadastro", () => {
     const again = (await req("POST", `${P}/import/accounts`, file)).json;
     expect(again.created).toBe(0);
     expect(again.rows.slice(0, 3).every((r: { status: string }) => r.status === "ja_existe")).toBe(true);
+  });
+});
+
+describe("Perfil só combinados", () => {
+  it("vê e marca só os próprios combinados; finanças são negadas no servidor", async () => {
+    const pid = (await req("POST", `${P}/people`, { name: "Membro Combinados" })).json.id;
+    const u = (await req("POST", "/api/v1/admin/users", { email: "combinados@familia.test", name: "Combinados", personId: pid, conductOnly: true, password: "frase-longa-combinados-1" })).json;
+    expect(u).toMatchObject({ conductOnly: true, isGuardian: false });
+    expect((await req("POST", "/api/v1/admin/users", { email: "x@familia.test", name: "X", role: "ADMIN", conductOnly: true, password: "frase-longa-x-12345" })).status).toBeGreaterThanOrEqual(403);
+    const r = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "combinados@familia.test", password: "frase-longa-combinados-1" }) });
+    const ck = (r.headers.get("set-cookie") ?? "").split(";")[0]!;
+    const as = (m: string, path: string, body?: unknown) => req(m, path, body, { cookie: ck });
+    for (const path of [`${P}/dashboard`, `${P}/accounts`, `${P}/titles`, `${P}/debts/summary`, `${P}/ranking`, `${P}/statement?from=2027-01&to=2027-01`, "/api/v1/byte4tech/titles", "/api/v1/admin/audit"])
+      expect((await as("GET", path)).status, path).toBe(403);
+    expect((await as("POST", `${P}/expenses/quick`, { amountCents: 100, description: "x", category: "OUTROS" })).status).toBe(403);
+    expect((await as("GET", "/api/v1/auth/me")).json.conductOnly).toBe(true);
+    expect((await as("GET", `${P}/conduct/board`)).status).toBe(200);
+    const al = (await as("GET", `${P}/conduct/allowance`)).json;
+    expect(al.people.every((p: { personId: string }) => p.personId === pid)).toBe(true);
+    const rule = (await req("POST", `${P}/conduct/rules`, { kind: "HABIT", name: "Arrumar a cama teste", assignees: [{ personId: pid }] })).json;
+    expect((await as("POST", `${P}/conduct/checks`, { personId: pid, ruleId: rule.id, day: new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" }), checked: true })).status).toBeLessThan(300);
+    const other = (await req("POST", `${P}/people`, { name: "Outra Pessoa" })).json.id;
+    expect((await as("POST", `${P}/conduct/checks`, { personId: other, ruleId: rule.id, day: "2026-11-22", checked: true })).status).toBe(403);
   });
 });

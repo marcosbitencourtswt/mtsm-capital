@@ -71,6 +71,7 @@ $("#menu-btn").addEventListener("click", () => menu(true));
 scrim.addEventListener("click", () => menu(false));
 
 async function render() {
+  if (me?.conductOnly && tab !== "combinados") tab = "combinados";
   document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   $("#page-title").textContent = TITLES[tab]; document.title = `${TITLES[tab]} · NOFINANCE`;
   try { await loadPeople(); view.innerHTML = await renderers[tab](); }
@@ -316,7 +317,12 @@ async function extrato() {
   const st = await api<{ months: Month[] }>(`/statement?from=${extFrom}&to=${extTo}`);
   const tot = (k: keyof Month) => st.months.reduce((s, m) => s + (m[k] as number), 0);
   const cell = (v: number, sign = false) => `<td class="${sign ? (v < 0 ? "neg" : "pos") : ""}">${money(v)}</td>`;
+  const y = Number(today().slice(0, 4));
+  const isYear = (yy: number) => extFrom === `${yy}-01` && extTo === `${yy}-12`;
+  const n = st.months.length || 1;
   return `<h2>Extrato realizado</h2>
+  <div class="row" style="margin-bottom:12px">${[y, y - 1, y - 2].map(yy => `<button class="${isYear(yy) ? "" : "ghost"} sm" data-extyear="${yy}">Ano ${yy}</button>`).join("")}
+    <button class="ghost sm" data-extyear="last6">Últimos 6 meses</button></div>
   <form class="card form" id="ext">
     <div><label>De</label><input type="month" name="from" value="${extFrom}"></div>
     <div><label>Até</label><input type="month" name="to" value="${extTo}"></div>
@@ -325,6 +331,7 @@ async function extrato() {
   <div class="card scroll"><table>
     <tr><th>Mês</th><th>Receitas</th><th>Despesas</th><th>Juros pagos</th><th>Amortização</th><th>Empréstimos</th><th>Resultado</th><th>Caixa</th></tr>
     ${st.months.map(m => `<tr><td>${monthLabel(m.month)}</td>${cell(m.incomeCents)}${cell(m.expenseCents)}${cell(m.interestPaidCents)}${cell(m.amortizationCents)}${cell(m.loansInCents)}${cell(m.resultCents, true)}${cell(m.cashBalanceCents, true)}</tr>`).join("")}
+    ${st.months.length > 1 ? `<tr><td class="muted">Média/mês</td><td class="muted">${money(Math.round(tot("incomeCents") / n))}</td><td class="muted">${money(Math.round(tot("expenseCents") / n))}</td><td class="muted">${money(Math.round(tot("interestPaidCents") / n))}</td><td></td><td></td><td class="muted">${money(Math.round(tot("resultCents") / n))}</td><td></td></tr>` : ""}
     <tr><th>Total</th><th>${money(tot("incomeCents"))}</th><th>${money(tot("expenseCents"))}</th><th>${money(tot("interestPaidCents"))}</th><th>${money(tot("amortizationCents"))}</th><th>${money(tot("loansInCents"))}</th><th>${money(tot("resultCents"))}</th><th></th></tr>
   </table></div>
   <p class="muted">Despesa = contas pagas + juros. Devolver o valor emprestado é amortização (sai do caixa, não é despesa). Empréstimo recebido entra no caixa, mas não é receita.</p>`;
@@ -524,9 +531,10 @@ async function combinadosPage() {
   if (getEntity() !== "personal") return `<div class="empty">Os Combinados são da família (entidade Pessoal).</div>`;
   const [b, rules, al] = await Promise.all([api<Board>(`/conduct/board?date=${cbDate}`), api<Rule[]>("/conduct/rules"), api<AllowanceResp>("/conduct/allowance")]);
   if (!cbView && me?.personId && b.rows.some(r => r.personId === me!.personId) && !isGuardian()) cbView = me.personId;
+  if (me?.conductOnly && cbView !== "" && cbView !== me.personId) cbView = me.personId ?? "";
   const tabs = `<div class="person-tabs" role="tablist">
     <button role="tab" class="${cbView === "" ? "on" : ""}" data-cbperson="">Família</button>
-    ${b.rows.map(r => `<button role="tab" class="${cbView === r.personId ? "on" : ""}" data-cbperson="${r.personId}">${esc(r.name)}${r.personId === me?.personId ? " (eu)" : ""}</button>`).join("")}
+    ${b.rows.filter(r => !me?.conductOnly || r.personId === me.personId).map(r => `<button role="tab" class="${cbView === r.personId ? "on" : ""}" data-cbperson="${r.personId}">${esc(r.name)}${r.personId === me?.personId ? " (eu)" : ""}</button>`).join("")}
     ${isAdmin() ? `<button role="tab" class="${cbView === "admin" ? "on" : ""}" data-cbperson="admin">Regras e mesadas</button>` : ""}</div>`;
   if (cbView === "admin" && isAdmin()) return tabs + await combinadosAdmin(rules, al);
   const row = b.rows.find(r => r.personId === cbView);
@@ -967,7 +975,7 @@ function editCats(current: string[]) {
 }
 
 /* ===================== Usuários (administrador) ===================== */
-interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; isRoot: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; totpEnabled?: boolean; }
+interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; isRoot: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; totpEnabled?: boolean; conductOnly?: boolean; }
 let usersCache: UserRow[] = [];
 async function usersSection() {
   usersCache = await root<UserRow[]>("/admin/users");
@@ -976,7 +984,7 @@ async function usersSection() {
   <div class="list">${usersCache.map(u => `<div class="item">
     <div class="head"><span class="who">${esc(u.name)}${nick(u.nickname)}</span><span class="chip${u.isRoot ? " NO_VALUE" : ""}">${u.isRoot ? "Root" : u.role === "ADMIN" ? "Administrador" : u.isGuardian ? "Responsável" : "Membro"}</span></div>
     <div class="meta"><span class="muted">${esc(u.email)}</span>${u.active ? "" : `<span class="chip OVERDUE">desativado</span>`}
-      ${u.mustChangePassword ? `<span class="chip NO_VALUE">senha provisória</span>` : ""}${u.totpEnabled ? `<span class="chip SETTLED">2 etapas</span>` : ""}
+      ${u.mustChangePassword ? `<span class="chip NO_VALUE">senha provisória</span>` : ""}${u.totpEnabled ? `<span class="chip SETTLED">2 etapas</span>` : ""}${u.conductOnly ? `<span class="chip">só combinados</span>` : ""}
       <span class="muted">último acesso: ${u.lastLoginAt ? br(u.lastLoginAt) : "nunca"}</span></div>
     ${u.id !== me?.id && !u.isRoot && (isRoot() || u.role !== "ADMIN") ? `<div class="actions"><button class="ghost sm" data-edituser="${u.id}">Editar</button><button class="ghost sm" data-resetuser="${u.id}">Nova senha</button>${u.totpEnabled ? `<button class="ghost sm" data-reset2fa="${u.id}">Zerar 2 etapas</button>` : ""}
       <button class="ghost sm" data-toggleuser="${u.id}" data-active="${u.active}">${u.active ? "Desativar" : "Reativar"}</button></div>` : ""}
@@ -988,13 +996,14 @@ function userForm(u?: UserRow) {
     <div><label>Apelido</label><input name="nick" placeholder="ex.: Gastadora" value="${esc(u?.nickname)}"></div>
     <div><label>Perfil</label><select name="role"><option value="MEMBER" ${u?.role === "MEMBER" ? "selected" : ""}>Membro</option>${isRoot() ? `<option value="ADMIN" ${u?.role === "ADMIN" ? "selected" : ""}>Administrador</option>` : ""}</select></div>
     <label class="inline full"><input type="checkbox" name="guard" ${u?.isGuardian ? "checked" : ""}> Responsável (registra ocorrências e corrige hábitos)</label>
+    <label class="inline full"><input type="checkbox" name="conly" ${u?.conductOnly ? "checked" : ""}> Só combinados (vê e marca só as tarefas e a mesada dela; nada de finanças)</label>
     <div class="full"><label>É quem em Pessoas da casa</label><select name="person"><option value="">—</option>${people.map(p => `<option value="${p.id}" ${u?.personId === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
     ${u ? "" : `<div class="full"><label>Senha provisória (mín. 10 caracteres)</label><input name="pw" type="text" minlength="10" required autocomplete="off"></div>`}`;
 }
 function newUser() {
   openDialog("Novo usuário", userForm(), "Criar", async f => {
     await root("/admin/users", { method: "POST", body: { name: str(f, "name"), email: str(f, "email"), nickname: str(f, "nick") || null,
-      role: str(f, "role"), personId: str(f, "person") || null, isGuardian: f.has("guard"), password: str(f, "pw") } });
+      role: str(f, "role"), personId: str(f, "person") || null, isGuardian: f.has("guard") && !f.has("conly"), conductOnly: f.has("conly"), password: str(f, "pw") } });
     toast("Usuário criado. Passe a senha provisória pessoalmente.");
   });
 }
@@ -1002,7 +1011,7 @@ function editUser(id: string) {
   const u = usersCache.find(x => x.id === id); if (!u) return;
   openDialog("Editar usuário", userForm(u), "Salvar", async f => {
     await root(`/admin/users/${id}`, { method: "PATCH", body: { name: str(f, "name"), email: str(f, "email"), nickname: str(f, "nick") || null,
-      role: str(f, "role"), personId: str(f, "person") || null, isGuardian: f.has("guard") } });
+      role: str(f, "role"), personId: str(f, "person") || null, isGuardian: f.has("guard") && !f.has("conly"), conductOnly: f.has("conly") } });
     toast("Usuário alterado.");
   });
 }
@@ -1041,7 +1050,7 @@ async function adminPage() {
       ${sessions.map(x => `<tr><td>${esc(x.name)}${x.isRoot ? ` <span class="chip NO_VALUE">Root</span>` : ""}</td><td>${esc(x.device)}</td><td>${dt(x.lastSeenAt)}</td><td>${dt(x.createdAt)}</td>
         <td>${x.current ? `<span class="chip SETTLED">este aparelho</span>` : !x.isRoot || isRoot() ? `<button class="danger sm" data-endsess="${x.id}">Encerrar</button>` : ""}</td></tr>`).join("")}</table></div>
     <h2 style="margin-top:24px">Registro de alterações</h2>
-    <p class="muted">Toda criação, correção e exclusão, com quem fez e quando. Guardado por ${ret.months} ${ret.months === 1 ? "mês" : "meses"} no banco; as cópias diárias ficam no backup.</p>
+    <p class="muted">Toda criação, correção e exclusão, com quem fez e quando. ${ret.months ? `Guardado por ${ret.months} ${ret.months === 1 ? "mês" : "meses"} no banco.` : "Guardado sem limite de tempo."} Cópia mensal permanente no backup.</p>
     <form class="form card" id="audit-f">
       <div><label>Quem</label><select name="actor"><option value="">Todos</option>${usersCache.map(u => `<option value="${u.id}" ${auditQ.actor === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
         <option value="system" ${auditQ.actor === "system" ? "selected" : ""}>Sistema (automático)</option></select></div>
@@ -1051,8 +1060,8 @@ async function adminPage() {
       <div><button>Filtrar</button></div>
     </form>
     <div class="card">${log.length ? `<ul class="pays">${log.map(l => `<li><span><b>${esc(l.who)}</b> ${esc(l.action)} <b>${esc(l.what.toLowerCase())}</b>${l.label ? `: ${esc(l.label)}` : ""}${l.changed.length ? ` <span class="muted">(${l.changed.slice(0, 5).map(esc).join(", ")})</span>` : ""}</span><span class="muted">${dt(l.at)}</span></li>`).join("")}</ul>` : `<p class="muted">Nada encontrado com esses filtros.</p>`}</div>
-    ${isRoot() ? `<form class="form card" id="ret-f"><div><label>Guardar o registro por (meses)</label><input name="m" type="number" min="1" max="60" value="${ret.months}" required></div>
-      <div><button class="ghost">Salvar</button></div><p class="muted full">Registros mais antigos saem do banco no ciclo diário. Atenção: o backup guarda só os últimos 30 dias, então o que sair do banco depois disso não tem volta.</p></form>` : ""}
+    ${isRoot() ? `<form class="form card" id="ret-f"><div><label>Guardar o registro por (meses, 0 = sem limite)</label><input name="m" type="number" min="0" max="600" value="${ret.months}" required></div>
+      <div><button class="ghost">Salvar</button></div><p class="muted full">Recomendado: 0 (sem limite). Se limitar, o que sair do banco fica só nas cópias mensais permanentes do backup.</p></form>` : ""}
     <details class="card"><summary>Versão do banco (${st.migrations.length} atualizações aplicadas)</summary><ul class="pays">${st.migrations.map(m => `<li><span>${esc(m.name)}</span><span class="muted">${dt(m.appliedAt)}</span></li>`).join("")}</ul></details>`;
 }
 
@@ -1124,6 +1133,9 @@ function renderMe() {
     <div class="row"><button data-act="password">Trocar senha</button><button data-act="logout">Sair</button></div>` : "";
   entSel.hidden = !isAdmin();
   $("#tab-admin").hidden = !isAdmin();
+  const conly = !!me?.conductOnly;
+  document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => { if (b.id !== "tab-admin") b.hidden = conly && b.dataset.tab !== "combinados"; });
+  if (conly) { tab = "combinados"; if (location.hash !== "#combinados") history.replaceState(null, "", "#combinados"); }
   if (!isAdmin() && tab === "admin") tab = "painel";
   if (!isAdmin() && getEntity() !== "personal") { setEntity("personal"); entSel.value = "personal"; }
 }
@@ -1210,6 +1222,7 @@ view.addEventListener("click", async e => {
     else if (d.del) { if (confirm("Excluir esta conta? Ela some das listas (fica no histórico).")) { await api(`/titles/${d.del}`, { method: "DELETE" }); toast("Conta excluída."); await render(); } }
     else if (d.filter) { statusFilter = d.filter as typeof statusFilter; await render(); }
     else if (d.proj) { projMonths = Number(d.proj); await render(); }
+    else if (d.extyear) { if (d.extyear === "last6") { extTo = today().slice(0, 7); extFrom = addMonths(extTo, -5).slice(0, 7); } else { extFrom = `${d.extyear}-01`; extTo = `${d.extyear}-12`; } await render(); }
     else if (d.newrec !== undefined) newRec();
     else if (d.newperson !== undefined) newPerson();
     else if (d.goto) { if (d.bkowner !== undefined) bkOwner = d.bkowner; tab = d.goto as Tab; history.pushState(null, "", `#${tab}`); scrollTo(0, 0); await render(); }
@@ -1283,7 +1296,7 @@ view.addEventListener("submit", async e => {
       const f = new FormData(form); auditQ = { actor: str(f, "actor"), area: str(f, "area"), from: str(f, "from"), to: str(f, "to") }; await render();
     } else if (form.id === "ret-f") {
       const months = Number(str(new FormData(form), "m"));
-      await root("/admin/audit/retention", { method: "PUT", body: { months } }); toast(`Registro guardado por ${months} ${months === 1 ? "mês" : "meses"}.`); await render();
+      await root("/admin/audit/retention", { method: "PUT", body: { months } }); toast(months ? `Registro guardado por ${months} ${months === 1 ? "mês" : "meses"}.` : "Registro guardado sem limite."); await render();
     } else if (form.id === "quick-in") {
       const f = new FormData(form);
       const src = srcOf(f);
