@@ -232,16 +232,17 @@ export async function payoffOrder(db: Db, e: Entity, personId?: string | null, a
 export async function debtSummary(db: Db, e: Entity, asOf = todaySP()) {
   const po = await payoffOrder(db, e, undefined, asOf, "juros");
   const items = po.items.filter(x => x.nature === "DEBT" || x.nature === "CARD");
-  const paid = (await db.query<{ person_id: string | null; total: string; month: string }>(
+  const paid = (await db.query<{ person_id: string | null; total: string; month: string; saved: string }>(
     `SELECT t.person_id, sum(s.amount_cents)::bigint AS total,
+            COALESCE(sum(s.amount_cents) FILTER (WHERE s.method = 'DISCOUNT'), 0)::bigint AS saved,
             COALESCE(sum(s.amount_cents) FILTER (WHERE s.paid_on >= date_trunc('month', $2::date) AND s.method <> 'DISCOUNT'), 0)::bigint AS month
      FROM settlement s JOIN title t ON t.id = s.title_id
-     WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'DEBT' AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.paid_on <= $2::date
+     WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature IN ('DEBT', 'CARD') AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.paid_on <= $2::date
      GROUP BY t.person_id`, [e, asOf])).rows;
   const people = (await db.query<{ id: string; name: string }>("SELECT id, name FROM person WHERE entity_code = $1", [e])).rows;
   const nameOf = (id: string | null) => (id ? people.find(p => p.id === id)?.name ?? "?" : "Casa / dos dois");
   const empty = (personId: string | null, name: string) => ({ personId, name, owedCents: 0, debtOpenCents: 0, cardsOpenCents: 0, paidCents: 0, paidThisMonthCents: 0,
-    progressPct: 0, count: 0, overdueCount: 0, overdueCents: 0, negativados: 0, monthlyInterestCents: 0, unknownRates: 0 });
+    progressPct: 0, count: 0, overdueCount: 0, overdueCents: 0, negativados: 0, monthlyInterestCents: 0, unknownRates: 0, savedCents: 0 });
   const rows = new Map<string, ReturnType<typeof empty>>();
   const row = (id: string | null) => { const k = id ?? "none"; if (!rows.has(k)) rows.set(k, empty(id, nameOf(id))); return rows.get(k)!; };
   for (const x of items) {
@@ -252,12 +253,12 @@ export async function debtSummary(db: Db, e: Entity, asOf = todaySP()) {
     if (x.negativado) r.negativados++;
     if (x.monthlyRateBp == null) r.unknownRates++; else r.monthlyInterestCents += x.monthlyInterestCents ?? 0;
   }
-  for (const p of paid) { const r = row(p.person_id); r.paidCents += Number(p.total); r.paidThisMonthCents += Number(p.month); }
+  for (const p of paid) { const r = row(p.person_id); r.paidCents += Number(p.total); r.paidThisMonthCents += Number(p.month); r.savedCents += Number(p.saved); }
   const pct = (r: { paidCents: number; debtOpenCents: number }) => (r.paidCents + r.debtOpenCents ? Math.round(r.paidCents * 1000 / (r.paidCents + r.debtOpenCents)) / 10 : 0);
   const owners = [...rows.values()].sort((a, b) => (a.personId === null ? 1 : 0) - (b.personId === null ? 1 : 0) || a.name.localeCompare(b.name));
   for (const r of owners) r.progressPct = pct(r);
   const total = owners.reduce((t, r) => {
-    for (const k of ["owedCents", "debtOpenCents", "cardsOpenCents", "paidCents", "paidThisMonthCents", "count", "overdueCount", "overdueCents", "negativados", "monthlyInterestCents", "unknownRates"] as const) t[k] += r[k];
+    for (const k of ["owedCents", "debtOpenCents", "cardsOpenCents", "paidCents", "paidThisMonthCents", "count", "overdueCount", "overdueCents", "negativados", "monthlyInterestCents", "unknownRates", "savedCents"] as const) t[k] += r[k];
     return t;
   }, empty(null, "Total"));
   total.progressPct = pct(total);

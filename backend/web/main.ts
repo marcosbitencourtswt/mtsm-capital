@@ -291,13 +291,26 @@ async function payTitle(id: string) {
     <div class="full"><label>${t.kind === "PAYABLE" ? "Saiu de qual conta" : "Entrou em qual conta"} (opcional)</label><select name="acc"><option value="">Não informar</option>
       ${cashAccs.map(a => `<option value="${a.id}">${esc(a.ownerName)} · ${esc(a.institution ?? "")} ${esc(a.name)}</option>`).join("")}</select></div>
     <div class="full"><label>Observação</label><input name="notes"></div>
-    ${t.kind === "PAYABLE" ? `<label class="inline full"><input type="checkbox" name="disc"> Quitar com desconto: o que faltar vira desconto (ex.: deve 1.800, pagou 1.500 → 300 de desconto)</label>` : ""}
+    ${t.kind === "PAYABLE" ? `<label class="inline full"><input type="checkbox" name="disc"> Paguei menos e quitei (antecipei ou negociei)</label>
+      <div class="full saving" data-saving hidden>Valor da dívida <b>${money(t.openCents)}</b> → pago <b data-paid></b> → <span class="pos">economia <b data-save></b></span></div>` : ""}
     <p class="muted full">Em aberto: ${money(t.openCents)}</p>`, verb, async f => {
     const r = await api<Title>(`/titles/${id}/settlements`, { method: "POST", headers: { "idempotency-key": key },
       body: { amountCents: centsOf(f, "v"), paidOn: str(f, "dt") || undefined, ...(str(f, "m").startsWith("card:") ? { cardAccountId: str(f, "m").slice(5) } : { method: "ACCOUNT", accountId: str(f, "acc") || null }), notes: str(f, "notes") || null, ...(f.has("disc") ? { discountRest: true } : {}) } });
-    const w = r.settlements?.at(-1)?.warnings ?? [];
-    toast(w.length ? `Registrado com aviso: ${w.join("; ")}` : "Registrado.", w.length > 0);
+    const w = r.settlements?.find(s => s.method !== "DISCOUNT" && s.warnings.length)?.warnings ?? [];
+    const saved = f.has("disc") ? t.openCents - (centsOf(f, "v") ?? t.openCents) : 0;
+    toast(w.length ? `Registrado com aviso: ${w.join("; ")}` : saved > 0 ? `Quitado. Economia de ${money(saved)}.` : "Registrado.", w.length > 0);
   });
+  // "Devia X → paguei Y → economizei Z", calculado enquanto digita.
+  const box = dlgForm.querySelector<HTMLElement>("[data-saving]");
+  if (box) {
+    const v = dlgForm.querySelector<HTMLInputElement>("input[name=v]")!, disc = dlgForm.querySelector<HTMLInputElement>("input[name=disc]")!;
+    const upd = () => {
+      const paid = parseMoney(v.value), ok = disc.checked && Number.isFinite(paid) && paid > 0 && paid < t.openCents;
+      box.hidden = !ok;
+      if (ok) { box.querySelector("[data-paid]")!.textContent = money(paid); box.querySelector("[data-save]")!.textContent = money(t.openCents - paid); }
+    };
+    v.addEventListener("input", upd); disc.addEventListener("change", () => { if (disc.checked && parseMoney(v.value) >= t.openCents) v.select(); upd(); });
+  }
 }
 
 async function showPays(id: string) {
@@ -826,7 +839,7 @@ function budgetForm(b: Budget) {
 
 /* ===================== Painel de dívidas ===================== */
 interface DebtRow { personId: string | null; name: string; owedCents: number; debtOpenCents: number; cardsOpenCents: number; paidCents: number; paidThisMonthCents: number;
-  progressPct: number; count: number; overdueCount: number; overdueCents: number; negativados: number; monthlyInterestCents: number; unknownRates: number; }
+  progressPct: number; count: number; overdueCount: number; overdueCents: number; negativados: number; monthlyInterestCents: number; unknownRates: number; savedCents: number; }
 interface DebtSummary { owners: DebtRow[]; total: DebtRow; }
 function debtBoard(d: DebtSummary) {
   if (!d.total.count && !d.total.paidCents) return "";
@@ -841,6 +854,7 @@ function debtBoard(d: DebtSummary) {
       ${r.negativados ? `<span class="neg">${r.negativados} negativada(s)</span>` : ""}
       <span>Juros ≈ <b>${money(r.monthlyInterestCents)}/mês</b>${r.unknownRates ? ` + ${r.unknownRates} sem taxa` : ""}</span>
       <span>Pago este mês <b>${money(r.paidThisMonthCents)}</b></span>
+      ${r.savedCents ? `<span class="pos">Economia antecipando/negociando <b>${money(r.savedCents)}</b></span>` : ""}
     </span></${total ? "div" : "button"}>`;
   return `<div class="debts">${d.owners.map(r => box(r)).join("")}${box(d.total, true)}</div>`;
 }

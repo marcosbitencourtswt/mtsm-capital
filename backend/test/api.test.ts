@@ -1017,6 +1017,8 @@ describe("Baixa com desconto", () => {
     expect(after.cashOutCents - before.cashOutCents).toBe(150000);
     expect(after.amortizationCents - before.amortizationCents).toBe(150000);
     expect(after.expenseCents - before.expenseCents).toBe(0);
+    // painel de dívidas mostra a economia (juros evitados / desconto)
+    expect((await req("GET", `${P}/debts/summary`)).json.total.savedCents).toBeGreaterThanOrEqual(30000);
     // receber não aceita desconto por este caminho
     const rec = (await req("POST", `${P}/titles`, { kind: "RECEIVABLE", nature: "INCOME", counterparty: "Cliente D", category: "RENDA", amountCents: 1000, dueDate: d })).json;
     expect((await req("POST", `${P}/titles/${rec.id}/settlements`, { amountCents: 500, paidOn: d, discountRest: true })).json.error.code).toBe("DISCOUNT_PAYABLE_ONLY");

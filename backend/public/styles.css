@@ -318,3 +318,4 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
 .bar.budget.warn i { background: var(--warning); }
 .bar.budget.over i { background: var(--danger); }
 @media (max-width: 699px) { .pending-card .st-grid { grid-template-columns: 1fr; } }
+.saving { padding: 8px 10px; border-radius: var(--radius-sm); background: var(--success-soft); font-size: 14px; }
