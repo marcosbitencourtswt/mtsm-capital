@@ -613,6 +613,7 @@ export async function audit(db: Db, rowId: string) {
 /* ---------- Erros do Postgres -> erros de domínio ---------- */
 export function pgToAppError(err: unknown): unknown {
   const e = err as { code?: string; constraint?: string; message?: string };
+  if (e.code === "MTSM1") return new AppError(422, "MONTH_CLOSED", e.message ?? "Mês fechado. Só o root pode corrigir.");
   if (e.code === "23514") return new AppError(422, "CONSTRAINT_VIOLATION", `Valor inválido (${e.constraint ?? "regra do banco"}).`);
   if (e.code === "23505") return new AppError(409, "DUPLICATE", "Registro duplicado.");
   if (e.code === "22P02" || e.code === "22007" || e.code === "22008") return new AppError(400, "INVALID_INPUT", "Formato inválido.");

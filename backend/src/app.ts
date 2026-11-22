@@ -370,6 +370,8 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     if (!isoDate.safeParse(d).success) throw new AppError(400, "INVALID_PARAM", "date inválido (AAAA-MM-DD).");
     return c.json(await conduct.board(db, d));
   });
+  v1.get("/:entity/conduct/pending", async c => { personal(c); return c.json(await conduct.pendingChecks(db)); });
+  v1.post("/:entity/conduct/checks/review", async c => c.json(await conduct.reviewCheck(db, personal(c), await body(c, checkInput.omit({ checked: true }).extend({ approve: z.boolean() }).strict()))));
   v1.post("/:entity/conduct/checks", async c => c.json(await conduct.setCheck(db, personal(c), await body(c, checkInput))));
   v1.post("/:entity/conduct/infractions", async c => c.json(await conduct.addInfraction(db, personal(c), await body(c, infractionInput)), 201));
   v1.post("/:entity/conduct/settle", async c => c.json(await conduct.settle(db, personal(c), await body(c, settleInput)), 201));

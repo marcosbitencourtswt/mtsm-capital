@@ -147,9 +147,20 @@ export async function setCheck(db: Db, u: U, i: { personId: string; ruleId: stri
   const person = await db.query("SELECT 1 FROM person WHERE id = $1 AND entity_code = 'PERSONAL' AND active", [i.personId]);
   if (!person.rowCount) throw new AppError(422, "PERSON_NOT_FOUND", "Pessoa não encontrada.");
   if (i.checked) {
-    await db.query(`INSERT INTO habit_check (person_id, rule_id, day, checked_by) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, [i.personId, i.ruleId, i.day, u.id]);
+    if (u.conductOnly) {
+      // Marca o que fez; só conta depois que um responsável aprovar.
+      await db.query(`INSERT INTO habit_check (person_id, rule_id, day, checked_by, approved) VALUES ($1,$2,$3,$4,false) ON CONFLICT DO NOTHING`, [i.personId, i.ruleId, i.day, u.id]);
+      return { ok: true, pending: true };
+    }
+    await db.query(`INSERT INTO habit_check (person_id, rule_id, day, checked_by, approved, approved_by, approved_at) VALUES ($1,$2,$3,$4,true,$4,now())
+      ON CONFLICT (person_id, rule_id, day) DO UPDATE SET approved = true, approved_by = EXCLUDED.approved_by, approved_at = now() WHERE NOT habit_check.approved`, [i.personId, i.ruleId, i.day, u.id]);
     await db.query(`UPDATE conduct_entry SET deleted_at = now() WHERE kind = 'HABIT_MISS' AND person_id = $1 AND rule_id = $2 AND day = $3 AND deleted_at IS NULL`, [i.personId, i.ruleId, i.day]);
   } else {
+    if (u.conductOnly) {
+      const r = await db.query(`DELETE FROM habit_check WHERE person_id = $1 AND rule_id = $2 AND day = $3 AND NOT approved`, [i.personId, i.ruleId, i.day]);
+      if (!r.rowCount) throw new AppError(422, "ALREADY_APPROVED", "Já foi aprovado. Para desfazer, fale com um responsável.");
+      return { ok: true };
+    }
     await db.query(`DELETE FROM habit_check WHERE person_id = $1 AND rule_id = $2 AND day = $3`, [i.personId, i.ruleId, i.day]);
     if (i.day < today) await db.query(`UPDATE conduct_entry SET deleted_at = NULL WHERE kind = 'HABIT_MISS' AND person_id = $1 AND rule_id = $2 AND day = $3`, [i.personId, i.ruleId, i.day]);
   }
@@ -228,7 +239,7 @@ export interface MonthScore { due: number; done: number; penaltyPoints: number; 
 async function monthScores(db: Db, month: string, upTo: string): Promise<Map<string, MonthScore>> {
   const from = monthStart(month), last = addDays(nextMonth(month), -1), to = upTo < last ? upTo : last;
   const ctx = await loadCtx(db, from, to);
-  const checks = new Set((await db.query(`SELECT person_id, rule_id, day::text AS day FROM habit_check WHERE day BETWEEN $1 AND $2`, [from, to])).rows
+  const checks = new Set((await db.query(`SELECT person_id, rule_id, day::text AS day FROM habit_check WHERE day BETWEEN $1 AND $2 AND approved`, [from, to])).rows
     .map(r => `${r.rule_id}|${r.person_id}|${r.day}`));
   const pen = new Map((await db.query(`SELECT person_id, COALESCE(sum(points), 0)::int AS p FROM conduct_entry
     WHERE kind = 'INFRACTION' AND deleted_at IS NULL AND day BETWEEN $1 AND $2 GROUP BY person_id`, [from, to])).rows.map(r => [r.person_id, r.p as number]));
@@ -316,7 +327,7 @@ export async function board(db: Db, date = todaySP()) {
   await materializeMisses(db, today);
   const w = weekOf(date), to = w.end < today ? w.end : today;
   const ctx = await loadCtx(db, w.start, w.end);
-  const checks = (await db.query(`SELECT h.person_id, h.rule_id, h.day::text AS day, h.checked_at, cu.name AS by_name
+  const checks = (await db.query(`SELECT h.person_id, h.rule_id, h.day::text AS day, h.checked_at, h.approved, cu.name AS by_name
     FROM habit_check h LEFT JOIN app_user cu ON cu.id = h.checked_by WHERE h.day >= $1 AND h.day < $2`, [w.start, w.next])).rows;
   const entries = (await db.query(`SELECT e.id, e.person_id, e.kind, e.rule_id, e.day::text AS day, e.points, e.amount_cents, e.note, cu.name AS by_name
     FROM conduct_entry e LEFT JOIN app_user cu ON cu.id = e.created_by
@@ -334,7 +345,7 @@ export async function board(db: Db, date = todaySP()) {
   const rows = people.map(p => {
     const grid = days.map(day => ({ day, items: dueFor(ctx, p.id, day).map(r => {
       const c = checks.find(x => x.person_id === p.id && x.rule_id === r.id && x.day === day);
-      return { ruleId: r.id, name: r.name, schedule: r.schedule, done: !!c, checkedAt: c?.checked_at ?? null, by: c?.by_name ?? null };
+      return { ruleId: r.id, name: r.name, schedule: r.schedule, done: !!c && c.approved, pending: !!c && !c.approved, checkedAt: c?.checked_at ?? null, by: c?.by_name ?? null };
     }) }));
     const all = grid.flatMap(g => g.items), mine = entries.filter(e => e.person_id === p.id);
     const fullDays = grid.filter(g => g.items.length && g.items.every(x => x.done)).length;
@@ -406,3 +417,24 @@ export async function applyFamilyTemplate(db: Db, u: U) {
 }
 
 export { iso };
+
+/* ===================== Aprovação dos checks (perfil "só combinados") ===================== */
+export async function pendingChecks(db: Db) {
+  return (await db.query(`SELECT h.person_id AS "personId", p.name AS "personName", h.rule_id AS "ruleId", r.name AS "ruleName", h.day::text AS day, h.checked_at AS "checkedAt"
+    FROM habit_check h JOIN person p ON p.id = h.person_id JOIN conduct_rule r ON r.id = h.rule_id
+    WHERE NOT h.approved ORDER BY h.day, p.name, r.sort, r.name`)).rows;
+}
+export async function reviewCheck(db: Db, u: U, i: { personId: string; ruleId: string; day: string; approve: boolean }) {
+  requireJudge(u);
+  if (i.approve) {
+    const r = await db.query(`UPDATE habit_check SET approved = true, approved_by = $4, approved_at = now()
+      WHERE person_id = $1 AND rule_id = $2 AND day = $3 AND NOT approved`, [i.personId, i.ruleId, i.day, u.id]);
+    if (!r.rowCount) throw new AppError(404, "NOT_PENDING", "Esse check não está mais aguardando aprovação.");
+    await db.query(`UPDATE conduct_entry SET deleted_at = now() WHERE kind = 'HABIT_MISS' AND person_id = $1 AND rule_id = $2 AND day = $3 AND deleted_at IS NULL`, [i.personId, i.ruleId, i.day]);
+  } else {
+    const r = await db.query(`DELETE FROM habit_check WHERE person_id = $1 AND rule_id = $2 AND day = $3 AND NOT approved`, [i.personId, i.ruleId, i.day]);
+    if (!r.rowCount) throw new AppError(404, "NOT_PENDING", "Esse check não está mais aguardando aprovação.");
+    if (i.day < todaySP()) await materializeMisses(db); // recusado em dia que já passou vira falta
+  }
+  return { ok: true };
+}

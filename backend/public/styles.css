@@ -307,3 +307,6 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
 .imp { list-style: none; margin: 0; padding: 0; }
 .imp li { padding: 10px 0; border-bottom: 1px solid var(--line); display: grid; gap: 4px; font-size: 14px; }
 .imp li:last-child { border-bottom: 0; }
+.habit.wait { border-style: dashed; border-color: var(--warning); background: var(--warning-soft); }
+.dots i.wait { background: var(--warning); opacity: .6; }
+.pending-card { border-top: 2px solid var(--warning); }

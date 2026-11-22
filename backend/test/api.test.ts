@@ -29,6 +29,8 @@ beforeAll(async () => {
   await migrate(URL); await seed(URL);
   db = createPool(URL); app = createApp(db, { cronSecret: "segredo-cron", secureCookies: false });
   await createUser(db, { email: "admin@familia.test", name: "Marcos", role: "ADMIN", nickname: "Gastador", password: ADMIN_PW });
+  // Em produção o administrador principal é o root (o único que corrige mês fechado).
+  await db.query("UPDATE app_user SET is_root = true WHERE email = 'admin@familia.test'");
   const r = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "admin@familia.test", password: ADMIN_PW }) });
   cookie = (r.headers.get("set-cookie") ?? "").split(";")[0]!;
 });
@@ -706,13 +708,11 @@ describe("Registro de alterações e transferências", () => {
 
     // retenção: padrão 12 meses; só o root muda; o ciclo diário tira o que passou do prazo
     expect((await req("GET", "/api/v1/admin/audit/retention")).json.months).toBe(0);
-    await db.query("UPDATE app_user SET is_root = true WHERE email = 'admin@familia.test'");
     expect((await req("PUT", "/api/v1/admin/audit/retention", { months: 2 })).json.months).toBe(2);
     await db.query("INSERT INTO audit_log (table_name, row_id, action, at) VALUES ('title', 'velho', 'INSERT', now() - interval '3 months')");
     const cron = await app.request("/api/v1/cron/recurrences", { headers: { authorization: "Bearer segredo-cron" } });
     expect((await cron.json()).auditPruned).toBeGreaterThanOrEqual(1);
     expect((await db.query("SELECT count(*)::int AS n FROM audit_log WHERE row_id = 'velho'")).rows[0].n).toBe(0);
-    await db.query("UPDATE app_user SET is_root = false WHERE email = 'admin@familia.test'");
   });
 });
 
@@ -762,5 +762,60 @@ describe("Perfil só combinados", () => {
     expect((await as("POST", `${P}/conduct/checks`, { personId: pid, ruleId: rule.id, day: new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" }), checked: true })).status).toBeLessThan(300);
     const other = (await req("POST", `${P}/people`, { name: "Outra Pessoa" })).json.id;
     expect((await as("POST", `${P}/conduct/checks`, { personId: other, ruleId: rule.id, day: "2026-11-22", checked: true })).status).toBe(403);
+  });
+});
+
+describe("Fechamento do mês e aprovação de checks", () => {
+  const login = async (email: string, password: string) => {
+    const r = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
+    return (r.headers.get("set-cookie") ?? "").split(";")[0]!;
+  };
+  const sp = () => new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+  const monthsAgo = (n: number) => { const [y, m] = sp().split("-").map(Number) as [number, number]; const d = new Date(Date.UTC(y, m - 1 - n, 10)); return d.toISOString().slice(0, 10); };
+
+  it("mês fechado (a partir do dia 5 do mês seguinte) só aceita correção do root", async () => {
+    await createUser(db, { email: "resp@familia.test", name: "Responsável", role: "ADMIN", password: "frase-longa-resp-12" });
+    const ck = await login("resp@familia.test", "frase-longa-resp-12");
+    const t = (await req("POST", `${P}/titles`, { kind: "PAYABLE", nature: "EXPENSE", counterparty: "Conta fechamento", category: "OUTROS", amountCents: 5000, dueDate: monthsAgo(2) })).json;
+    // não-root: mês de 2 meses atrás está fechado
+    const r1 = await req("POST", `${P}/titles/${t.id}/settlements`, { amountCents: 1000, paidOn: monthsAgo(2) }, { cookie: ck });
+    expect(r1.status).toBe(422); expect(r1.json.error.code).toBe("MONTH_CLOSED"); expect(r1.json.error.message).toContain("Só o root");
+    // não-root no mês atual: ok
+    expect((await req("POST", `${P}/titles/${t.id}/settlements`, { amountCents: 1000, paidOn: sp() }, { cookie: ck })).status).toBe(201);
+    // root corrige o mês fechado
+    expect((await req("POST", `${P}/titles/${t.id}/settlements`, { amountCents: 1000, paidOn: monthsAgo(2) })).status).toBe(201);
+    // não-root não altera valor de conta que tem pagamento em mês fechado
+    expect((await req("PATCH", `${P}/titles/${t.id}`, { amountCents: 9000 }, { cookie: ck })).json.error.code).toBe("MONTH_CLOSED");
+    // gasto rápido com data no mês fechado também é recusado (e nada fica pela metade)
+    const before = (await req("GET", `${P}/titles`)).json.length;
+    expect((await req("POST", `${P}/expenses/quick`, { amountCents: 700, description: "Esquecido", category: "OUTROS", date: monthsAgo(2) }, { cookie: ck })).status).toBe(422);
+    expect((await req("GET", `${P}/titles`)).json.length).toBe(before);
+  });
+
+  it("check de quem é só combinados fica pendente até um responsável aprovar; recusado não conta", async () => {
+    const pid = (await req("POST", `${P}/people`, { name: "Criança Aprova" })).json.id;
+    await req("POST", "/api/v1/admin/users", { email: "aprova@familia.test", name: "Aprova", personId: pid, conductOnly: true, password: "frase-longa-aprova-1" });
+    await db.query("UPDATE app_user SET must_change_password = false WHERE email = 'aprova@familia.test'");
+    const kid = await login("aprova@familia.test", "frase-longa-aprova-1");
+    const r1 = (await req("POST", `${P}/conduct/rules`, { kind: "HABIT", name: "Tarefa aprova 1", assignees: [{ personId: pid }] })).json;
+    const r2 = (await req("POST", `${P}/conduct/rules`, { kind: "HABIT", name: "Tarefa aprova 2", assignees: [{ personId: pid }] })).json;
+    const day = sp();
+    await db.query("UPDATE conduct_rule SET starts_on = $1 WHERE id = ANY($2)", [day, [r1.id, r2.id]]); // tarefa nova vale a partir de amanhã; aqui, já hoje
+    expect((await req("POST", `${P}/conduct/checks`, { personId: pid, ruleId: r1.id, day, checked: true }, { cookie: kid })).json.pending).toBe(true);
+    await req("POST", `${P}/conduct/checks`, { personId: pid, ruleId: r2.id, day, checked: true }, { cookie: kid });
+    const item = async (ruleId: string) => (await req("GET", `${P}/conduct/board`)).json.rows.find((r: { personId: string }) => r.personId === pid)
+      .grid.find((g: { day: string }) => g.day === day).items.find((i: { ruleId: string }) => i.ruleId === ruleId);
+    expect(await item(r1.id)).toMatchObject({ done: false, pending: true });
+    const pend = (await req("GET", `${P}/conduct/pending`)).json.filter((p: { personId: string }) => p.personId === pid);
+    expect(pend).toHaveLength(2);
+    // a criança não aprova a si mesma
+    expect((await req("POST", `${P}/conduct/checks/review`, { personId: pid, ruleId: r1.id, day, approve: true }, { cookie: kid })).status).toBe(403);
+    expect((await req("POST", `${P}/conduct/checks/review`, { personId: pid, ruleId: r1.id, day, approve: true })).status).toBe(200);
+    expect((await req("POST", `${P}/conduct/checks/review`, { personId: pid, ruleId: r2.id, day, approve: false })).status).toBe(200);
+    expect(await item(r1.id)).toMatchObject({ done: true, pending: false });
+    expect(await item(r2.id)).toMatchObject({ done: false, pending: false });
+    // aprovado: a criança não desfaz sozinha
+    expect((await req("POST", `${P}/conduct/checks`, { personId: pid, ruleId: r1.id, day, checked: false }, { cookie: kid })).json.error.code).toBe("ALREADY_APPROVED");
+    expect((await req("GET", `${P}/conduct/pending`)).json.filter((p: { personId: string }) => p.personId === pid)).toHaveLength(0);
   });
 });

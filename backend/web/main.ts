@@ -97,6 +97,7 @@ async function painel() {
   const [d, rk, cb, accs] = await Promise.all([api<Dashboard>("/dashboard"), personal ? api<Ranking>("/ranking") : Promise.resolve(null),
     personal ? api<Board>("/conduct/board").catch(() => null) : Promise.resolve(null), api<Acc[]>("/accounts").catch(() => [] as Acc[])]);
   const ds = personal ? await api<DebtSummary>("/debts/summary").catch(() => null) : null;
+  pendingCache = personal && isGuardian() ? await api<Pending[]>("/conduct/pending").catch(() => []) : [];
   const live = accs.filter(a => a.active);
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
   const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
@@ -111,6 +112,7 @@ async function painel() {
     ${kpi("Saldo previsto", d.projectedBalanceCents, d.projectedBalanceCents < 0 ? "neg" : "", true)}
     ${kpi("A pagar", d.payableOpenCents)}${kpi("A receber", d.receivableOpenCents)}${kpi("Empréstimos", d.debtOpenCents)}
   </div>
+  ${pendingCard(pendingCache)}
   ${ds ? debtBoard(ds) : ""}
   ${cb ? todayCard(cb) : ""}
   ${rk ? spendKpis(rk) : ""}
@@ -490,7 +492,18 @@ function editPerson(id: string) {
 }
 
 /* ===================== Combinados ===================== */
-interface Item { ruleId: string; name: string; schedule: "DAILY" | "ROTATION" | "SPORADIC"; done: boolean; checkedAt: string | null; by: string | null; }
+interface Item { ruleId: string; name: string; schedule: "DAILY" | "ROTATION" | "SPORADIC"; done: boolean; pending?: boolean; checkedAt: string | null; by: string | null; }
+interface Pending { personId: string; personName: string; ruleId: string; ruleName: string; day: string; }
+/** Card de aprovações para os responsáveis: o que a criança marcou e ainda não conta na nota. */
+function pendingCard(list: Pending[]) {
+  if (!list.length) return "";
+  return `<div class="card pending-card"><div class="row spread"><h3 style="margin:0">Aguardando sua aprovação (${list.length})</h3></div>
+    <ul class="imp">${list.map(p => `<li><div><b>${esc(p.personName)}</b> · ${esc(p.ruleName)} <span class="muted">· ${br(p.day)}</span></div>
+      <div class="row"><button class="sm" data-review="${p.ruleId}" data-person="${p.personId}" data-day="${p.day}" data-val="true">Aprovar</button>
+        <button class="ghost sm" data-review="${p.ruleId}" data-person="${p.personId}" data-day="${p.day}" data-val="false">Recusar</button></div></li>`).join("")}</ul>
+    ${list.length > 1 ? `<div class="row"><button class="ghost sm" data-reviewall>Aprovar todos</button></div>` : ""}</div>`;
+}
+let pendingCache: Pending[] = [];
 interface Score { due: number; done: number; penaltyPoints: number; percent: number; }
 interface BoardRow { personId: string; name: string; nickname: string | null; hasLogin: boolean; grid: { day: string; items: Item[] }[]; fullDays: number; daysCounted: number;
   habitsDone: number; habitsDue: number; infractions: number; pointsLost: number; finesWeekCents: number; balanceCents: number; month: Score; }
@@ -508,7 +521,7 @@ interface AllowanceResp { month: string; inProgress: boolean; people: Allow[]; }
 const SCHED: Record<string, string> = { DAILY: "Todo dia", ROTATION: "Revezamento", SPORADIC: "Avulsa" };
 const dayOf = (r: BoardRow, day: string) => r.grid.find(g => g.day === day);
 const dots = (items: Item[] | undefined) => items && items.length ? `<span class="dots" role="img" aria-label="${items.filter(c => c.done).length} de ${items.length} tarefas">${
-  items.map(c => `<i class="${c.done ? "on" : ""}" title="${esc(c.name)}${c.done ? " ✓" : ""}"></i>`).join("")}</span>` : `<span class="muted">—</span>`;
+  items.map(c => `<i class="${c.done ? "on" : c.pending ? "wait" : ""}" title="${esc(c.name)}${c.done ? " ✓" : c.pending ? " (aguardando aprovação)" : ""}"></i>`).join("")}</span>` : `<span class="muted">—</span>`;
 const pctBar = (p: number) => `<div class="bar"><i style="width:${Math.max(0, Math.min(100, p))}%;background:${p >= 70 ? "var(--success)" : p >= 40 ? "var(--warning)" : "var(--danger)"}"></i></div>`;
 const fmtPct = (p: number) => `${p.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`;
 const stars = (n: number) => n ? `${"★".repeat(Math.min(n, 30))}${n > 30 ? ` +${n - 30}` : ""}` : "nenhuma ainda";
@@ -517,7 +530,7 @@ const stars = (n: number) => n ? `${"★".repeat(Math.min(n, 30))}${n > 30 ? ` +
 function todayCard(b: Board) {
   if (!b.rows.some(r => dayOf(r, b.today)?.items.length)) return "";
   const meRow = b.rows.find(r => r.personId === me?.personId);
-  const missing = meRow ? (dayOf(meRow, b.today)?.items ?? []).filter(i => !i.done) : [];
+  const missing = meRow ? (dayOf(meRow, b.today)?.items ?? []).filter(i => !i.done && !i.pending) : [];
   return `${missing.length ? `<div class="alert danger"><b>Seus combinados de hoje:</b> falta ${missing.map(h => esc(h.name)).join(", ")}.
       <button class="sm" data-goto="combinados">Marcar agora</button></div>` : ""}
     <div class="card"><div class="row spread"><h3 style="margin:0">Combinados de hoje</h3><button class="ghost sm" data-goto="combinados">Ver tudo</button></div>
@@ -537,6 +550,7 @@ async function combinadosPage() {
     ${b.rows.filter(r => !me?.conductOnly || r.personId === me.personId).map(r => `<button role="tab" class="${cbView === r.personId ? "on" : ""}" data-cbperson="${r.personId}">${esc(r.name)}${r.personId === me?.personId ? " (eu)" : ""}</button>`).join("")}
     ${isAdmin() ? `<button role="tab" class="${cbView === "admin" ? "on" : ""}" data-cbperson="admin">Regras e mesadas</button>` : ""}</div>`;
   if (cbView === "admin" && isAdmin()) return tabs + await combinadosAdmin(rules, al);
+  if (isGuardian()) { pendingCache = await api<Pending[]>("/conduct/pending").catch(() => []); if (cbView === "") return tabs + pendingCard(pendingCache) + familyView(b, al); }
   const row = b.rows.find(r => r.personId === cbView);
   return tabs + (row ? personView(b, row, al.people.find(a => a.personId === row.personId)) : familyView(b, al));
 }
@@ -583,10 +597,14 @@ function personView(b: Board, r: BoardRow, a: Allow | undefined) {
     const items = dayOf(r, day)?.items ?? [];
     if (!items.length) return `<div class="habit-day"><span class="muted">${label}: nenhuma tarefa.</span></div>`;
     return `<div class="habit-day"><span class="muted">${label}</span><div class="habit-btns">${items.map(i => `<div class="habit-wrap">
-      <button class="habit ${i.done ? "done" : ""}" ${canMark ? "" : "disabled"} data-check="${i.ruleId}" data-person="${r.personId}" data-day="${day}" data-val="${!i.done}" aria-pressed="${i.done}">
-        <span class="tick">${i.done ? "✓" : ""}</span><span>${esc(i.name)}${i.schedule !== "DAILY" ? `<small class="muted"> · ${SCHED[i.schedule]}</small>` : ""}</span></button>
+      <button class="habit ${i.done ? "done" : i.pending ? "wait" : ""}" ${canMark ? "" : "disabled"} data-check="${i.ruleId}" data-person="${r.personId}" data-day="${day}"
+        data-val="${i.pending ? String(isGuardian()) : String(!i.done)}" aria-pressed="${i.done}" ${i.pending ? `aria-label="${esc(i.name)}: aguardando aprovação"` : ""}>
+        <span class="tick">${i.done ? "✓" : i.pending ? "⏳" : ""}</span><span>${esc(i.name)}${i.schedule !== "DAILY" ? `<small class="muted"> · ${SCHED[i.schedule]}</small>` : ""}</span></button>
       ${isGuardian() && !i.done ? `<button class="ghost sm" data-blame="${i.ruleId}" data-person="${r.personId}" data-day="${day}">Culpa de outro</button>` : ""}
-      ${i.done && i.by ? `<small class="muted">marcado por ${esc(i.by)}</small>` : ""}</div>`).join("")}</div></div>`;
+      ${i.done && i.by ? `<small class="muted">marcado por ${esc(i.by)}</small>` : ""}
+      ${i.pending ? (isGuardian() ? `<span class="row"><button class="sm" data-review="${i.ruleId}" data-person="${r.personId}" data-day="${day}" data-val="true">Aprovar</button>
+        <button class="ghost sm" data-review="${i.ruleId}" data-person="${r.personId}" data-day="${day}" data-val="false">Recusar</button></span>`
+        : `<small class="muted">aguardando aprovação de um responsável</small>`) : ""}</div>`).join("")}</div></div>`;
   };
   const m = r.month;
   const isThisWeek = b.week.start <= b.today && b.today <= b.week.end;
@@ -1226,6 +1244,8 @@ view.addEventListener("click", async e => {
     else if (d.newrec !== undefined) newRec();
     else if (d.newperson !== undefined) newPerson();
     else if (d.goto) { if (d.bkowner !== undefined) bkOwner = d.bkowner; tab = d.goto as Tab; history.pushState(null, "", `#${tab}`); scrollTo(0, 0); await render(); }
+    else if (d.review) { await api("/conduct/checks/review", { method: "POST", body: { personId: d.person, ruleId: d.review, day: d.day, approve: d.val === "true" } }); toast(d.val === "true" ? "Aprovado." : "Recusado: não conta na nota."); await render(); }
+    else if (d.reviewall !== undefined) { for (const p of pendingCache) await api("/conduct/checks/review", { method: "POST", body: { personId: p.personId, ruleId: p.ruleId, day: p.day, approve: true } }); toast(`${pendingCache.length} aprovados.`); await render(); }
     else if (d.check) { await api("/conduct/checks", { method: "POST", body: { personId: d.person, ruleId: d.check, day: d.day, checked: d.val === "true" } }); await render(); }
     else if (d.cbweek !== undefined) { const n = Number(d.cbweek); if (n === 0) cbDate = today(); else { const x = new Date(`${cbDate}T12:00:00`); x.setDate(x.getDate() + n); cbDate = x.toLocaleDateString("sv-SE"); } await render(); }
     else if (d.infraction !== undefined) await infractionDialog();
