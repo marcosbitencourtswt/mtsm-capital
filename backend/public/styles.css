@@ -283,3 +283,19 @@ button.habit { height: auto; min-height: 52px; padding: 10px 12px; white-space: 
 ol.payoff { margin: 8px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
 ol.payoff li { padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 ol.payoff li .muted { display: block; margin-top: 2px; }
+
+/* Painel de dívidas: Marcos · Thaís · Total */
+.debts { display: grid; gap: var(--space-3, 12px); grid-template-columns: 1fr; margin-bottom: 16px; }
+@media (min-width: 700px) { .debts { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); } }
+.debt { cursor: pointer; display: flex; flex-direction: column; align-items: stretch; gap: 6px; text-align: left; color: var(--ink); margin: 0; }
+button.card.debt { height: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: var(--space-5); font-weight: 400; white-space: normal; }
+button.card.debt:hover { background: var(--surface); border-color: var(--accent); }
+.debt.total { border-top: 2px solid var(--accent); cursor: default; }
+.debt .l { font: 600 11px/16px var(--font-text); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-muted); }
+.debt.total .l { color: var(--accent-ink); }
+.debt .v { font: 600 26px/32px var(--font-text); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.debt .bar { height: 8px; margin: 2px 0; }
+.debt .bar i { background: var(--success); }
+.debt .meta { font-size: 13px; color: var(--ink-muted); display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.debt .meta b { color: var(--ink); font-weight: 600; }
+.debt .meta .neg { color: var(--danger); }

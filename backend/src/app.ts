@@ -313,6 +313,7 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     return c.json(r.title, 201);
   });
   // Bancos, cartões e empréstimos
+  v1.get("/:entity/debts/summary", async c => c.json(await accounts.debtSummary(db, c.get("entity"), asOf(c))));
   v1.get("/:entity/accounts", async c => c.json(await accounts.listAccounts(db, c.get("entity"), asOf(c))));
   v1.post("/:entity/accounts", async c => c.json(await accounts.createAccount(db, c.get("entity"), c.get("user"), await body(c, accountCreate)), 201));
   v1.patch("/:entity/accounts/:id", async c => c.json(await accounts.updateAccount(db, c.get("entity"), param(c, "id"), await body(c, accountPatch))));

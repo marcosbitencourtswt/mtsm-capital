@@ -646,3 +646,31 @@ describe("Verificação em duas etapas", () => {
     expect(l4.json.mfaRequired).toBeUndefined(); expect(l4.cookie).toMatch(/^nf_session=/);
   });
 });
+
+describe("Painel de dívidas", () => {
+  it("separa por dono, soma no total e atualiza ao quitar; trocar o dono leva as parcelas junto", async () => {
+    const ppl = (await req("GET", `${P}/people`)).json as { id: string; name: string }[];
+    const thais = ppl.find(p => p.name === "Thaís")!.id, marcos = ppl.find(p => p.name === "Marcos")!.id;
+    const sum = async () => (await req("GET", `${P}/debts/summary?asOf=2027-06-15`)).json;
+    const row = (s: { owners: { personId: string | null }[] }, id: string) => s.owners.find(o => o.personId === id) as { debtOpenCents: number; paidThisMonthCents: number; progressPct: number } | undefined;
+    const before = await sum();
+    const b0 = { t: row(before, thais)?.debtOpenCents ?? 0, m: row(before, marcos)?.debtOpenCents ?? 0, tot: before.total.debtOpenCents, paid: before.total.paidCents };
+    await req("POST", `${P}/accounts`, { type: "LOAN", name: "Empréstimo painel T", institution: "Loja P", ownerPersonId: thais, loan: { installmentCents: 10000, remaining: 3, firstOpenDueDate: "2027-07-10" } });
+    const m = (await req("POST", `${P}/accounts`, { type: "LOAN", name: "Empréstimo painel M", institution: "Banco P", ownerPersonId: thais, loan: { installmentCents: 20000, remaining: 2, firstOpenDueDate: "2027-07-20" } })).json;
+    // cadastrou no dono errado: corrige para o Marcos, as parcelas acompanham
+    await req("PATCH", `${P}/accounts/${m.id}`, { ownerPersonId: marcos });
+    let s = await sum();
+    expect(row(s, thais)!.debtOpenCents - b0.t).toBe(30000);
+    expect(row(s, marcos)!.debtOpenCents - b0.m).toBe(40000);
+    expect(s.total.debtOpenCents - b0.tot).toBe(70000);
+    // Marcos paga uma parcela
+    const parcela = (await req("GET", `${P}/titles?status=open`)).json.find((t: { counterparty: string; dueDate: string }) => t.counterparty.includes("Empréstimo painel M") && t.dueDate === "2027-07-20");
+    await req("POST", `${P}/titles/${parcela.id}/settlements`, { amountCents: 20000, paidOn: "2027-06-10" });
+    s = await sum();
+    expect(row(s, marcos)!.debtOpenCents - b0.m).toBe(20000);
+    expect(s.total.paidCents - b0.paid).toBe(20000);
+    expect(row(s, marcos)!.paidThisMonthCents).toBeGreaterThanOrEqual(20000);
+    expect(row(s, marcos)!.progressPct).toBeGreaterThan(0);
+    expect(s.total.owedCents).toBe(s.owners.reduce((a: number, o: { owedCents: number }) => a + o.owedCents, 0));
+  });
+});

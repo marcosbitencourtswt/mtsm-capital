@@ -79,6 +79,8 @@ export async function updateAccount(db: Db, e: Entity, id: string, p: Partial<Om
   if (!sets.length) throw new AppError(400, "EMPTY", "Nada para alterar.");
   const r = await db.query(`UPDATE account SET ${sets.join(", ")} WHERE entity_code = $1 AND id = $2 RETURNING id`, [e, id, ...vals]);
   if (!r.rowCount) throw new AppError(404, "ACCOUNT_NOT_FOUND", "Conta não encontrada.");
+  // Trocou o dono do cartão/dívida: parcelas e faturas acompanham (as compras continuam de quem comprou).
+  if ("ownerPersonId" in p) await db.query("UPDATE title SET person_id = $3 WHERE entity_code = $1 AND account_id = $2 AND nature IN ('DEBT', 'CARD')", [e, id, p.ownerPersonId ?? null]);
   return { id };
 }
 
@@ -219,4 +221,45 @@ export async function payoffOrder(db: Db, e: Entity, personId?: string | null, a
   return { asOf, strategy, totalCents: items.reduce((s, x) => s + x.openCents, 0),
     monthlyInterestCents: items.reduce((s, x) => s + (x.monthlyInterestCents ?? 0), 0),
     unknownRates: items.filter(x => x.monthlyRateBp == null).length, owners: [...byOwner.values()], items };
+}
+
+/**
+ * Painel de dívidas: uma linha por dono (Marcos, Thaís...) + Total.
+ * - deve agora = empréstimos/dívidas + faturas de cartão em aberto.
+ * - progresso = quitado ÷ (quitado + em aberto) considerando SÓ empréstimos/dívidas:
+ *   fatura paga todo mês não é "sair das dívidas" e inflaria a barra.
+ */
+export async function debtSummary(db: Db, e: Entity, asOf = todaySP()) {
+  const po = await payoffOrder(db, e, undefined, asOf, "juros");
+  const items = po.items.filter(x => x.nature === "DEBT" || x.nature === "CARD");
+  const paid = (await db.query<{ person_id: string | null; total: string; month: string }>(
+    `SELECT t.person_id, sum(s.amount_cents)::bigint AS total,
+            COALESCE(sum(s.amount_cents) FILTER (WHERE s.paid_on >= date_trunc('month', $2::date)), 0)::bigint AS month
+     FROM settlement s JOIN title t ON t.id = s.title_id
+     WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'DEBT' AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND s.paid_on <= $2::date
+     GROUP BY t.person_id`, [e, asOf])).rows;
+  const people = (await db.query<{ id: string; name: string }>("SELECT id, name FROM person WHERE entity_code = $1", [e])).rows;
+  const nameOf = (id: string | null) => (id ? people.find(p => p.id === id)?.name ?? "?" : "Casa / dos dois");
+  const empty = (personId: string | null, name: string) => ({ personId, name, owedCents: 0, debtOpenCents: 0, cardsOpenCents: 0, paidCents: 0, paidThisMonthCents: 0,
+    progressPct: 0, count: 0, overdueCount: 0, overdueCents: 0, negativados: 0, monthlyInterestCents: 0, unknownRates: 0 });
+  const rows = new Map<string, ReturnType<typeof empty>>();
+  const row = (id: string | null) => { const k = id ?? "none"; if (!rows.has(k)) rows.set(k, empty(id, nameOf(id))); return rows.get(k)!; };
+  for (const x of items) {
+    const r = row(x.ownerId ?? null);
+    r.owedCents += x.openCents; r.count++;
+    if (x.nature === "DEBT") r.debtOpenCents += x.openCents; else r.cardsOpenCents += x.openCents;
+    if (x.daysOverdue) { r.overdueCount++; r.overdueCents += x.openCents; }
+    if (x.negativado) r.negativados++;
+    if (x.monthlyRateBp == null) r.unknownRates++; else r.monthlyInterestCents += x.monthlyInterestCents ?? 0;
+  }
+  for (const p of paid) { const r = row(p.person_id); r.paidCents += Number(p.total); r.paidThisMonthCents += Number(p.month); }
+  const pct = (r: { paidCents: number; debtOpenCents: number }) => (r.paidCents + r.debtOpenCents ? Math.round(r.paidCents * 1000 / (r.paidCents + r.debtOpenCents)) / 10 : 0);
+  const owners = [...rows.values()].sort((a, b) => (a.personId === null ? 1 : 0) - (b.personId === null ? 1 : 0) || a.name.localeCompare(b.name));
+  for (const r of owners) r.progressPct = pct(r);
+  const total = owners.reduce((t, r) => {
+    for (const k of ["owedCents", "debtOpenCents", "cardsOpenCents", "paidCents", "paidThisMonthCents", "count", "overdueCount", "overdueCents", "negativados", "monthlyInterestCents", "unknownRates"] as const) t[k] += r[k];
+    return t;
+  }, empty(null, "Total"));
+  total.progressPct = pct(total);
+  return { asOf, owners, total };
 }

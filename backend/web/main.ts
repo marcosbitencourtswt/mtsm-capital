@@ -95,6 +95,7 @@ async function painel() {
   const personal = getEntity() === "personal";
   const [d, rk, cb, accs] = await Promise.all([api<Dashboard>("/dashboard"), personal ? api<Ranking>("/ranking") : Promise.resolve(null),
     personal ? api<Board>("/conduct/board").catch(() => null) : Promise.resolve(null), api<Acc[]>("/accounts").catch(() => [] as Acc[])]);
+  const ds = personal ? await api<DebtSummary>("/debts/summary").catch(() => null) : null;
   const live = accs.filter(a => a.active);
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
   const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
@@ -106,8 +107,9 @@ async function painel() {
   return `
   <div class="grid kpis">
     ${kpi("Saldo previsto", d.projectedBalanceCents, d.projectedBalanceCents < 0 ? "neg" : "", true)}
-    ${kpi("A pagar", d.payableOpenCents)}${kpi("A receber", d.receivableOpenCents)}${kpi("Dívidas", d.debtOpenCents)}
+    ${kpi("A pagar", d.payableOpenCents)}${kpi("A receber", d.receivableOpenCents)}${kpi("Empréstimos", d.debtOpenCents)}
   </div>
+  ${ds ? debtBoard(ds) : ""}
   ${cb ? todayCard(cb) : ""}
   ${rk ? spendKpis(rk) : ""}
   ${d.overdue.length ? `<div class="alert danger"><b>${d.overdue.length} conta(s) vencida(s):</b> ${d.overdue.map(t => `${esc(t.counterparty)} ${money(t.openCents)}`).join(" · ")}</div>` : ""}
@@ -709,9 +711,30 @@ let bkStrategy: "juros" | "rapidas" | "nome" = "juros";
 const STRATEGY = { juros: ["Menos juros", "Atrasados e depois os juros mais altos. Economiza mais dinheiro."],
   rapidas: ["Vitórias rápidas", "Menores primeiro. Fecha dívidas rápido e dá fôlego."],
   nome: ["Limpar o nome", "Negativadas e as atrasadas há mais tempo primeiro."] } as const;
+/* ===================== Painel de dívidas ===================== */
+interface DebtRow { personId: string | null; name: string; owedCents: number; debtOpenCents: number; cardsOpenCents: number; paidCents: number; paidThisMonthCents: number;
+  progressPct: number; count: number; overdueCount: number; overdueCents: number; negativados: number; monthlyInterestCents: number; unknownRates: number; }
+interface DebtSummary { owners: DebtRow[]; total: DebtRow; }
+function debtBoard(d: DebtSummary) {
+  if (!d.total.count && !d.total.paidCents) return "";
+  const box = (r: DebtRow, total = false) => `<${total ? "div" : "button type=\"button\""} class="card debt${total ? " total" : ""}" ${total ? "" : `data-bkowner="${r.personId ?? "none"}" data-goto="bancos" title="Ver dívidas de ${esc(r.name)}"`}>
+    <span class="l">${total ? "Dívidas da família" : `Dívidas · ${esc(r.name)}`}</span>
+    <span class="v ${r.owedCents ? "" : "pos"}">${money(r.owedCents)}</span>
+    <div class="bar" role="progressbar" aria-valuenow="${r.progressPct}" aria-valuemin="0" aria-valuemax="100" aria-label="Quitado"><i style="width:${Math.min(100, r.progressPct)}%"></i></div>
+    <span class="meta"><span><b>${r.progressPct.toLocaleString("pt-BR")}%</b> dos empréstimos quitado (${money(r.paidCents)})</span></span>
+    <span class="meta">
+      <span>Empréstimos <b>${money(r.debtOpenCents)}</b></span><span>Cartões <b>${money(r.cardsOpenCents)}</b></span>
+      ${r.overdueCount ? `<span class="neg">${r.overdueCount} atrasada(s) · ${money(r.overdueCents)}</span>` : `<span>nada atrasado</span>`}
+      ${r.negativados ? `<span class="neg">${r.negativados} negativada(s)</span>` : ""}
+      <span>Juros ≈ <b>${money(r.monthlyInterestCents)}/mês</b>${r.unknownRates ? ` + ${r.unknownRates} sem taxa` : ""}</span>
+      <span>Pago este mês <b>${money(r.paidThisMonthCents)}</b></span>
+    </span></${total ? "div" : "button"}>`;
+  return `<div class="debts">${d.owners.map(r => box(r)).join("")}${box(d.total, true)}</div>`;
+}
+
 async function bancosPage() {
   const q = `?strategy=${bkStrategy}${bkOwner ? `&person=${bkOwner}` : ""}`;
-  const [accs, ov, po] = await Promise.all([api<Acc[]>("/accounts"), api<{ people: OwnerRow[] }>("/overview"), api<Payoff>(`/payoff-order${q}`)]);
+  const [accs, ov, po, ds] = await Promise.all([api<Acc[]>("/accounts"), api<{ people: OwnerRow[] }>("/overview"), api<Payoff>(`/payoff-order${q}`), api<DebtSummary>("/debts/summary")]);
   const owners = [{ id: "", name: "Todos" }, ...people.filter(p => p.active).map(p => ({ id: p.id, name: p.name })), { id: "none", name: "Dos dois / casa" }];
   const shown = accs.filter(a => a.active && (bkOwner === "" || (bkOwner === "none" ? !a.ownerPersonId : a.ownerPersonId === bkOwner)));
   const card = (o: OwnerRow) => `<div class="card">
@@ -740,6 +763,7 @@ async function bancosPage() {
       ${a.openCount ? `<button class="ghost sm" data-goto="pagar">Ver contas</button>` : ""}</div></div>`;
   return `<div class="row spread"><h2>Bancos e dívidas</h2><button data-newacc>+ Adicionar</button></div>
   <p class="muted">Cada banco pode ter só saldo, só dívida, conta e cartão… Cadastre produto por produto, com o dono. Informe o saldo de hoje; o sistema calcula o resto.</p>
+  ${debtBoard(ds)}
   <div class="person-tabs">${owners.map(o => `<button class="${bkOwner === o.id ? "on" : ""}" data-bkowner="${o.id}">${esc(o.name)}</button>`).join("")}</div>
   ${ov.people.filter(o => bkOwner === "" || (bkOwner === "none" ? o.personId === null : o.personId === bkOwner)).map(card).join("")}
   <h3 style="margin-top:20px">Produtos</h3>
@@ -1114,7 +1138,7 @@ view.addEventListener("click", async e => {
     else if (d.proj) { projMonths = Number(d.proj); await render(); }
     else if (d.newrec !== undefined) newRec();
     else if (d.newperson !== undefined) newPerson();
-    else if (d.goto) { tab = d.goto as Tab; history.pushState(null, "", `#${tab}`); scrollTo(0, 0); await render(); }
+    else if (d.goto) { if (d.bkowner !== undefined) bkOwner = d.bkowner; tab = d.goto as Tab; history.pushState(null, "", `#${tab}`); scrollTo(0, 0); await render(); }
     else if (d.check) { await api("/conduct/checks", { method: "POST", body: { personId: d.person, ruleId: d.check, day: d.day, checked: d.val === "true" } }); await render(); }
     else if (d.cbweek !== undefined) { const n = Number(d.cbweek); if (n === 0) cbDate = today(); else { const x = new Date(`${cbDate}T12:00:00`); x.setDate(x.getDate() + n); cbDate = x.toLocaleDateString("sv-SE"); } await render(); }
     else if (d.infraction !== undefined) await infractionDialog();
