@@ -1177,3 +1177,39 @@ describe("Caixa de cupons e leitor com chave limitada", () => {
     expect((await db.query("SELECT count(*)::int AS n FROM receipt_inbox WHERE id = $1", [up.json.id])).rows[0].n).toBe(0);
   });
 });
+
+describe("Ponte PJ → PF e impostos da PJ", () => {
+  it("repasse quita as automáticas do mês, move o dinheiro e os impostos mostram a situação", async () => {
+    const B = "/api/v1/byte4tech", d = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" }), m = d.slice(0, 7);
+    const pj = (await req("POST", `${B}/accounts`, { type: "CHECKING", name: "Conta PJ ponte", institution: "Banco PJ", openingBalanceCents: 1000000 })).json;
+    const pf = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta PF ponte", institution: "Banco PF", openingBalanceCents: 0 })).json;
+    await req("POST", `${B}/recurrences`, { kind: "PAYABLE", nature: "EXPENSE", description: "Pró-labore (repasse para a PF)", category: "PRO_LABORE", defaultAmountCents: 144269, dueDay: 28, startMonth: m });
+    await req("POST", `${B}/recurrences`, { kind: "PAYABLE", nature: "EXPENSE", description: "DAS ponte", category: "IMPOSTOS", defaultAmountCents: 94398, dueDay: 28, startMonth: m });
+    await req("POST", `${P}/recurrences`, { kind: "RECEIVABLE", nature: "INCOME", description: "Pró-labore Byte4Tech (líquido)", category: "RENDA", defaultAmountCents: 144269, dueDay: 28, startMonth: m });
+    await req("POST", `${B}/recurrences/generate?month=${m}`); await req("POST", `${P}/recurrences/generate?month=${m}`);
+    const countPj = async () => (await req("GET", `${B}/titles`)).json.filter((t: { category: string }) => t.category === "PRO_LABORE").length;
+    const before = await countPj();
+
+    const r = await req("POST", `${B}/bridge`, { kind: "PRO_LABORE", amountCents: 144269, fromAccountId: pj.id, toAccountId: pf.id, date: d });
+    expect(r.status).toBe(201);
+    expect(await countPj()).toBe(before); // quitou a automática, não criou outra
+    expect((await req("GET", `${B}/titles/${r.json.pjTitleId}`)).json.status).toBe("SETTLED");
+    expect((await req("GET", `${P}/titles/${r.json.pfTitleId}`)).json).toMatchObject({ status: "SETTLED", counterparty: "Pró-labore Byte4Tech (líquido)" });
+    const bal = async (ent: string, id: string) => (await req("GET", `${ent}/accounts`)).json.find((a: { id: string }) => a.id === id).balanceCents;
+    expect(await bal(B, pj.id)).toBe(1000000 - 144269);
+    expect(await bal(P, pf.id)).toBe(144269);
+
+    // lucros: sem automática, cria os dois lados
+    const l = (await req("POST", `${B}/bridge`, { kind: "LUCROS", amountCents: 300000, fromAccountId: pj.id, toAccountId: pf.id, date: d })).json;
+    expect((await req("GET", `${B}/titles/${l.pjTitleId}`)).json).toMatchObject({ category: "LUCROS", status: "SETTLED" });
+    expect(await bal(P, pf.id)).toBe(144269 + 300000);
+
+    // impostos do mês
+    const tx = (await req("GET", `${B}/taxes?month=${m}`)).json;
+    expect(tx.find((t: { name: string }) => t.name === "DAS ponte")).toMatchObject({ status: "em aberto" });
+    expect(tx.find((t: { category: string }) => t.category === "PRO_LABORE")).toMatchObject({ status: "pago" });
+    // não funciona no Pessoal; contas trocadas de lado são recusadas
+    expect((await req("POST", `${P}/bridge`, { kind: "LUCROS", amountCents: 100, fromAccountId: pj.id, toAccountId: pf.id })).status).toBe(400);
+    expect((await req("POST", `${B}/bridge`, { kind: "LUCROS", amountCents: 100, fromAccountId: pf.id, toAccountId: pj.id })).json.error.code).toBe("ACCOUNT_NOT_FOUND");
+  });
+});

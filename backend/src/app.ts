@@ -11,6 +11,7 @@ import * as statement from "./statement.js";
 import * as budget from "./budget.js";
 import * as requests from "./requests.js";
 import * as receipts from "./receipts.js";
+import * as bridge from "./bridge.js";
 import { report } from "./report.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
@@ -450,7 +451,21 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     if (!isoMonth.safeParse(m).success) throw new AppError(400, "INVALID_PARAM", "month inválido (AAAA-MM).");
     return c.json(await report(db, c.get("entity"), m, asOf(c)));
   });
-  // Caixa de cupons (cada um envia a foto; o Marcos pede ao Claude para ler)
+  // Ponte PJ → PF (só na Byte4Tech, só o root) e impostos do mês da PJ
+  const pjOnly = (c: Context<{ Variables: Vars }>) => { if (c.get("entity") !== "BYTE4TECH") throw new AppError(400, "PJ_ONLY", "Isso é da Byte4Tech (PJ)."); requireAdmin(c); };
+  v1.get("/:entity/bridge/targets", async c => { pjOnly(c); return c.json(await bridge.targets(db)); });
+  v1.post("/:entity/bridge", async c => {
+    pjOnly(c);
+    const i = await body(c, z.object({ kind: z.enum(["PRO_LABORE", "LUCROS"]), amountCents: positiveCents, date: isoDate.optional(), fromAccountId: uuid, toAccountId: uuid }).strict());
+    return c.json(await bridge.transferToPersonal(db, c.get("user"), i), 201);
+  });
+  v1.get("/:entity/taxes", async c => {
+    pjOnly(c);
+    const m = c.req.query("month") ?? todaySP().slice(0, 7);
+    if (!isoMonth.safeParse(m).success) throw new AppError(400, "INVALID_PARAM", "month inválido (AAAA-MM).");
+    return c.json(await bridge.taxStatus(db, m.slice(0, 7), asOf(c)));
+  });
+  // Caixa de cupons (cada um envia a foto; o responsável pede ao Claude para ler)
   v1.get("/:entity/receipts", async c => c.json(await receipts.list(db, c.get("entity"), c.get("user"))));
   v1.post("/:entity/receipts", async c => {
     const i = await body(c, z.object({ image: z.string().min(100).max(2_100_000).regex(/^[A-Za-z0-9+/=]+$/), accountId: uuid.nullable().optional(),
