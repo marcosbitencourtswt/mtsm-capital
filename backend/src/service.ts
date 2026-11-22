@@ -122,7 +122,7 @@ export async function deleteTitle(db: Db, e: Entity, id: string) {
 }
 
 /* ---------- Baixas (pagamentos/recebimentos) ---------- */
-export interface SettlementInput { amountCents: number; paidOn?: string; method?: "ACCOUNT" | "CARD"; notes?: string | null; createdBy?: string; }
+export interface SettlementInput { amountCents: number; paidOn?: string; method?: "ACCOUNT" | "CARD"; notes?: string | null; createdBy?: string; accountId?: string | null; }
 
 /** Avisos (não bloqueiam): regra 7 (cartão em dívida) e pagamento acima do saldo. */
 export function settlementWarnings(nature: Nature, method: string | undefined, amount: number, open: number): string[] {
@@ -130,6 +130,14 @@ export function settlementWarnings(nature: Nature, method: string | undefined, a
   if (nature === "DEBT" && method === "CARD") w.push("REGRA_7: cartão usado para pagar dívida");
   if (amount > open) w.push(`PAGO_ACIMA_DO_SALDO: excedeu em ${amount - Math.max(0, open)} centavos`);
   return w;
+}
+
+/** Conta de onde sai/entra o dinheiro: precisa ser da mesma entidade e do tipo que guarda saldo. */
+async function accountOf(q: Q, e: Entity, id: string | null | undefined): Promise<string | null> {
+  if (!id) return null;
+  const r = await q.query("SELECT 1 FROM account WHERE id = $1 AND entity_code = $2 AND type IN ('CHECKING','SAVINGS','INVESTMENT','CASH')", [id, e]);
+  if (!r.rowCount) throw new AppError(422, "ACCOUNT_NOT_FOUND", "Conta de pagamento inválida.");
+  return id;
 }
 
 export async function createSettlement(db: Db, e: Entity, titleId: string, i: SettlementInput, idemKey?: string, asOf = todaySP()) {
@@ -146,8 +154,8 @@ export async function createSettlement(db: Db, e: Entity, titleId: string, i: Se
   // Nada é bloqueado: regras viram avisos gravados.
   const warnings = settlementWarnings(t.nature, i.method, i.amountCents, t.openCents);
   await db.query(
-    "INSERT INTO settlement (title_id, amount_cents, paid_on, method, notes, idempotency_key, warnings, created_by) VALUES ($1,$2,COALESCE($3::date, current_date),$4,$5,$6,$7,$8)",
-    [titleId, i.amountCents, i.paidOn ?? null, i.method ?? "ACCOUNT", i.notes ?? null, idemKey ?? null, warnings, i.createdBy ?? null]);
+    "INSERT INTO settlement (title_id, amount_cents, paid_on, method, notes, idempotency_key, warnings, created_by, account_id) VALUES ($1,$2,COALESCE($3::date, current_date),$4,$5,$6,$7,$8,$9)",
+    [titleId, i.amountCents, i.paidOn ?? null, i.method ?? "ACCOUNT", i.notes ?? null, idemKey ?? null, warnings, i.createdBy ?? null, await accountOf(db, e, i.accountId)]);
   return { duplicate: false, title: await getTitle(db, e, titleId, asOf) };
 }
 
@@ -368,7 +376,7 @@ export async function guard(db: Db, e: Entity, i: { amountCents: number; categor
 }
 
 /** "Já gastei": cria a despesa e a baixa juntas. Nunca bloqueia: fora do escopo fica registrado como aviso. */
-export async function quickExpense(db: Db, e: Entity, i: { amountCents: number; category: string; description: string; date?: string; method?: "ACCOUNT" | "CARD"; personId?: string | null; createdBy?: string }) {
+export async function quickExpense(db: Db, e: Entity, i: { amountCents: number; category: string; description: string; date?: string; method?: "ACCOUNT" | "CARD"; personId?: string | null; createdBy?: string; accountId?: string | null }) {
   await assertPerson(db, e, i.personId);
   const g = await guard(db, e, i);
   const date = i.date ?? todaySP();
@@ -377,8 +385,8 @@ export async function quickExpense(db: Db, e: Entity, i: { amountCents: number; 
       `INSERT INTO title (entity_code, kind, nature, counterparty, category, amount_cents, due_date, start_date, notes, person_id, created_by)
        VALUES ($1,'PAYABLE','EXPENSE',$2,$3,$4,$5,$5,$6,$7,$8) RETURNING id`,
       [e, i.description.trim(), i.category, i.amountCents, date, g.allowed ? "Dentro do escopo" : `FORA do escopo: ${g.message}`, i.personId ?? null, i.createdBy ?? null]);
-    await c.query("INSERT INTO settlement (title_id, amount_cents, paid_on, method, warnings, created_by) VALUES ($1,$2,$3,$4,$5,$6)",
-      [t.rows[0]!.id, i.amountCents, date, i.method ?? "ACCOUNT", g.allowed ? [] : [`GUARDIAO_${g.rule}: ${g.message}`], i.createdBy ?? null]);
+    await c.query("INSERT INTO settlement (title_id, amount_cents, paid_on, method, warnings, created_by, account_id) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [t.rows[0]!.id, i.amountCents, date, i.method ?? "ACCOUNT", g.allowed ? [] : [`GUARDIAO_${g.rule}: ${g.message}`], i.createdBy ?? null, await accountOf(c, e, i.accountId)]);
     return { guard: g, title: await getTitle(c, e, t.rows[0]!.id) };
   });
 }

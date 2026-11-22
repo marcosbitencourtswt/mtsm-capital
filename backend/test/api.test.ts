@@ -490,3 +490,60 @@ describe("Combinados v2 e mesada", () => {
     expect(r.json).toMatchObject({ kind: "RECEIVABLE", nature: "INCOME", status: "SETTLED", personId: thais });
   });
 });
+
+describe("Bancos, cartões, empréstimos e ordem de pagamento", () => {
+  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+  const back = (n: number) => new Date(new Date(`${today}T12:00:00Z`).getTime() - n * 86400000).toISOString().slice(0, 10);
+  const fwd = (n: number) => back(-n);
+  it("cadastra produtos independentes por dono, calcula saldo, limite, atraso e a ordem sugerida", async () => {
+    const ppl = (await req("GET", `${P}/people`)).json as { id: string; name: string }[];
+    const marcos = ppl.find(p => p.name === "Marcos")!.id, thais = ppl.find(p => p.name === "Thaís")!.id;
+
+    // Marcos: Inter com conta (saldo) e cartão; um banco só com empréstimo
+    const conta = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta", institution: "Inter", ownerPersonId: marcos, openingBalanceCents: 120000 })).json;
+    const cartao = await req("POST", `${P}/accounts`, { type: "CARD", name: "Cartão", institution: "Inter", ownerPersonId: marcos, creditLimitCents: 200000,
+      closingDay: 1, dueDay: 10, monthlyRateBp: 1612, rateSource: "pesquisa BC", currentBill: { amountCents: 150000, dueDate: fwd(5) } });
+    expect(cartao.status).toBe(201);
+    const emp = await req("POST", `${P}/accounts`, { type: "LOAN", name: "Empréstimo pessoal", institution: "Banco X", ownerPersonId: marcos, monthlyRateBp: 450,
+      loan: { installmentCents: 45000, remaining: 4, firstOpenDueDate: back(40), totalInstallments: 12 } });
+    expect(emp.status).toBe(201);
+    // Thaís: cartão de loja atrasado, juros desconhecido
+    await req("POST", `${P}/accounts`, { type: "CARD", name: "Cartão", institution: "Loja Y", ownerPersonId: thais, creditLimitCents: 300000, currentBill: { amountCents: 302600, dueDate: back(7) } });
+    // empréstimo sem os dados obrigatórios
+    expect((await req("POST", `${P}/accounts`, { type: "LOAN", name: "X", ownerPersonId: thais })).status).toBe(422);
+
+    const list = (await req("GET", `${P}/accounts`)).json as { id: string; institution: string; type: string; balanceCents: number | null; availableLimitCents: number | null; overdueCount: number; maxDaysOverdue: number; openCents: number; ownerName: string }[];
+    const inter = list.find(a => a.institution === "Inter" && a.type === "CARD")!;
+    expect(inter.availableLimitCents).toBe(50000);
+    const loan = list.find(a => a.institution === "Banco X")!;
+    expect(loan.openCents).toBe(4 * 45000);
+    expect(loan.overdueCount).toBe(2); // vencidas há 40 e ~10 dias
+    expect(list.find(a => a.institution === "Loja Y")!.maxDaysOverdue).toBe(7);
+
+    // pagamento pela conta reduz o saldo; transferência entre contas próprias não é receita nem despesa
+    const fatura = (await req("GET", `${P}/titles?status=open`)).json.find((t: { counterparty: string }) => t.counterparty === "Fatura Inter · Cartão");
+    await req("POST", `${P}/titles/${fatura.id}/settlements`, { amountCents: 50000, accountId: conta.id });
+    const poup = (await req("POST", `${P}/accounts`, { type: "SAVINGS", name: "Reserva", institution: "Inter", ownerPersonId: marcos, openingBalanceCents: 0 })).json;
+    expect((await req("POST", `${P}/transfers`, { fromAccountId: conta.id, toAccountId: poup.id, amountCents: 20000 })).status).toBe(201);
+    const list2 = (await req("GET", `${P}/accounts`)).json as { id: string; balanceCents: number }[];
+    expect(list2.find(a => a.id === conta.id)!.balanceCents).toBe(120000 - 50000 - 20000);
+    expect(list2.find(a => a.id === poup.id)!.balanceCents).toBe(20000);
+    // pagar com conta de outro tipo é recusado
+    expect((await req("POST", `${P}/titles/${fatura.id}/settlements`, { amountCents: 100, accountId: emp.json.id })).status).toBe(422);
+
+    // visão por dono
+    const ov = (await req("GET", `${P}/overview`)).json;
+    const om = ov.people.find((p: { name: string }) => p.name === "Marcos"), ot = ov.people.find((p: { name: string }) => p.name === "Thaís");
+    expect(om.cashCents).toBe(50000); expect(om.savedCents).toBe(20000);
+    expect(ot.overdueCount).toBeGreaterThanOrEqual(1);
+
+    // ordem: atrasados primeiro; entre atrasados, o de juro maior (desconhecido conta como ~10%)
+    const order = (await req("GET", `${P}/payoff-order`)).json;
+    const firstNotOverdue = order.items.findIndex((x: { daysOverdue: number }) => x.daysOverdue === 0);
+    expect(order.items.slice(0, firstNotOverdue).every((x: { daysOverdue: number }) => x.daysOverdue > 0)).toBe(true);
+    expect(order.items[0].reasons.join(" ")).toMatch(/atrasado/);
+    const onlyThais = (await req("GET", `${P}/payoff-order?person=${thais}`)).json;
+    expect(onlyThais.items.every((x: { ownerName: string }) => x.ownerName === "Thaís")).toBe(true);
+    expect(onlyThais.unknownRates).toBeGreaterThanOrEqual(1);
+  });
+});

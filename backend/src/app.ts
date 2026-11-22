@@ -4,6 +4,7 @@ import { secureHeaders } from "hono/secure-headers";
 import * as auth from "./auth.js";
 import * as conduct from "./conduct.js";
 import * as admin from "./admin.js";
+import * as accounts from "./accounts.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
@@ -33,7 +34,7 @@ const titleCreate = z.object({
 const titlePatch = titleCreate.omit({ kind: true, loan: true }).partial().strict();
 const settlementCreate = z.object({
   amountCents: positiveCents, paidOn: isoDate.optional(), method: z.enum(["ACCOUNT", "CARD"]).optional(),
-  notes: z.string().max(500).nullable().optional(),
+  notes: z.string().max(500).nullable().optional(), accountId: uuid.nullable().optional(),
 }).strict();
 const settlementPatch = settlementCreate.partial().strict();
 const recurrenceCreate = z.object({
@@ -64,11 +65,21 @@ const sporadicInput = z.object({ ruleId: uuid, personId: uuid, day: isoDate, act
 const blameInput = z.object({ ruleId: uuid, day: isoDate, fromPersonId: uuid, toPersonId: uuid, note: z.string().trim().max(200).nullable().optional() }).strict();
 const planInput = z.object({ mode: z.enum(["MONEY", "STARS", "NONE"]), amountCents: cents.optional(), consequence: z.string().trim().max(120).nullable().optional(), deductFines: z.boolean().optional() }).strict();
 const closeInput = z.object({ personId: uuid, month: isoMonth, deductFines: z.boolean().optional() }).strict();
-const quickIncome = z.object({ amountCents: positiveCents, description: text(120), category: text(40), date: isoDate.optional(), personId: personRef }).strict();
+const quickIncome = z.object({ amountCents: positiveCents, description: text(120), category: text(40), date: isoDate.optional(), personId: personRef, accountId: uuid.nullable().optional() }).strict();
+const accountType = z.enum(["CHECKING", "SAVINGS", "INVESTMENT", "CARD", "LOAN", "CASH"]);
+const day = z.number().int().min(1).max(31).nullable().optional();
+const accountCreate = z.object({ type: accountType, name: text(80), institution: z.string().trim().max(80).nullable().optional(), ownerPersonId: personRef,
+  openingBalanceCents: z.number().int().min(-1e11).max(1e11).optional(), creditLimitCents: cents.nullable().optional(), closingDay: day, dueDay: day,
+  monthlyRateBp: z.number().int().min(0).max(100000).nullable().optional(), rateSource: z.string().trim().max(80).nullable().optional(), notes: z.string().trim().max(300).nullable().optional(),
+  currentBill: z.object({ amountCents: cents, dueDate: isoDate }).strict().nullable().optional(),
+  loan: z.object({ installmentCents: positiveCents, remaining: z.number().int().min(1).max(480), firstOpenDueDate: isoDate, totalInstallments: z.number().int().min(1).max(480).nullable().optional() }).strict().nullable().optional() }).strict();
+const accountPatch = accountCreate.omit({ type: true, currentBill: true, loan: true }).partial().extend({ active: z.boolean().optional() }).strict();
+const billInput = z.object({ amountCents: positiveCents, dueDate: isoDate }).strict();
+const transferInput = z.object({ fromAccountId: uuid, toAccountId: uuid, amountCents: positiveCents, day: isoDate.optional(), note: z.string().trim().max(200).nullable().optional() }).strict();
 const settleInput = z.object({ personId: uuid, kind: z.enum(["PAYMENT", "WAIVER"]), amountCents: positiveCents, note: z.string().trim().max(200).nullable().optional() }).strict();
 const categoriesInput = z.object({ categories: z.array(text(40)).max(40) }).strict();
 const guardInput = z.object({ amountCents: positiveCents, category: text(40), date: isoDate.optional() }).strict();
-const quickInput = guardInput.extend({ description: text(120), method: z.enum(["ACCOUNT", "CARD"]).optional(), personId: personRef }).strict();
+const quickInput = guardInput.extend({ description: text(120), method: z.enum(["ACCOUNT", "CARD"]).optional(), personId: personRef, accountId: uuid.nullable().optional() }).strict();
 
 async function body<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T>> {
   let raw: unknown;
@@ -280,8 +291,20 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     const personId = i.personId === undefined && c.get("entity") === "PERSONAL" ? u.personId : i.personId;
     const t = await svc.createTitle(db, c.get("entity"), { kind: "RECEIVABLE", nature: "INCOME", counterparty: i.description, category: i.category,
       amountCents: i.amountCents, dueDate: i.date ?? todaySP(), personId, createdBy: u.id });
-    const r = await svc.createSettlement(db, c.get("entity"), t.id, { amountCents: i.amountCents, paidOn: i.date, createdBy: u.id });
+    const r = await svc.createSettlement(db, c.get("entity"), t.id, { amountCents: i.amountCents, paidOn: i.date, createdBy: u.id, accountId: i.accountId ?? null });
     return c.json(r.title, 201);
+  });
+  // Bancos, cartões e empréstimos
+  v1.get("/:entity/accounts", async c => c.json(await accounts.listAccounts(db, c.get("entity"), asOf(c))));
+  v1.post("/:entity/accounts", async c => c.json(await accounts.createAccount(db, c.get("entity"), c.get("user"), await body(c, accountCreate)), 201));
+  v1.patch("/:entity/accounts/:id", async c => c.json(await accounts.updateAccount(db, c.get("entity"), param(c, "id"), await body(c, accountPatch))));
+  v1.post("/:entity/accounts/:id/bill", async c => c.json(await accounts.addCardBill(db, c.get("entity"), c.get("user"), param(c, "id"), await body(c, billInput)), 201));
+  v1.post("/:entity/transfers", async c => c.json(await accounts.createTransfer(db, c.get("entity"), c.get("user"), await body(c, transferInput)), 201));
+  v1.get("/:entity/overview", async c => c.json(await accounts.overview(db, c.get("entity"), asOf(c))));
+  v1.get("/:entity/payoff-order", async c => {
+    const p = c.req.query("person");
+    if (p && p !== "none" && !uuid.safeParse(p).success) throw new AppError(400, "INVALID_PARAM", "person inválido.");
+    return c.json(await accounts.payoffOrder(db, c.get("entity"), p === undefined ? undefined : p === "none" ? null : p, asOf(c)));
   });
   v1.get("/:entity/ranking", async c => {
     const d = c.req.query("date") ?? todaySP();

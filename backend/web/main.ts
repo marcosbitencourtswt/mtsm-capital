@@ -60,10 +60,10 @@ function centsOf(f: FormData, k: string, required = true): number | null {
 }
 
 /* ===================== Roteamento ===================== */
-type Tab = "painel" | "admin" | "combinados" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
+type Tab = "painel" | "admin" | "bancos" | "combinados" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
 let tab: Tab = (location.hash.slice(1) as Tab) || "painel";
-const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, combinados: combinadosPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
-const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", combinados: "Combinados", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
+const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, bancos: bancosPage, combinados: combinadosPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
+const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", bancos: "Bancos e dívidas", combinados: "Combinados", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
 const side = $("#side"), scrim = $("#scrim");
 const menu = (open: boolean) => { side.classList.toggle("open", open); scrim.classList.toggle("open", open); };
 $("#menu-btn").addEventListener("click", () => menu(true));
@@ -246,17 +246,20 @@ async function editTitle(id: string) {
 }
 
 async function payTitle(id: string) {
-  const t = await api<Title>(`/titles/${id}`);
+  const [t, accs] = await Promise.all([api<Title>(`/titles/${id}`), api<Acc[]>("/accounts").catch(() => [] as Acc[])]);
+  const cashAccs = accs.filter(a => a.active && isCashAcc(a.type));
   const key = crypto.randomUUID(); // evita duplicar com duplo toque
   const verb = t.kind === "PAYABLE" ? "Pagar" : "Receber";
   openDialog(`${verb}: ${t.counterparty}`, `
     <div><label>Valor (R$)</label><input name="v" inputmode="decimal" value="${t.openCents > 0 ? moneyInput(t.openCents) : ""}" required></div>
     <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
     ${t.kind === "PAYABLE" ? `<div class="full"><label>Pago com</label><select name="m"><option value="ACCOUNT">Conta / Pix / dinheiro</option><option value="CARD">Cartão de crédito</option></select></div>` : ""}
+    <div class="full"><label>${t.kind === "PAYABLE" ? "Saiu de qual conta" : "Entrou em qual conta"} (opcional)</label><select name="acc"><option value="">Não informar</option>
+      ${cashAccs.map(a => `<option value="${a.id}">${esc(a.ownerName)} · ${esc(a.institution ?? "")} ${esc(a.name)}</option>`).join("")}</select></div>
     <div class="full"><label>Observação</label><input name="notes"></div>
     <p class="muted full">Em aberto: ${money(t.openCents)}</p>`, verb, async f => {
     const r = await api<Title>(`/titles/${id}/settlements`, { method: "POST", headers: { "idempotency-key": key },
-      body: { amountCents: centsOf(f, "v"), paidOn: str(f, "dt") || undefined, method: (str(f, "m") || "ACCOUNT"), notes: str(f, "notes") || null } });
+      body: { amountCents: centsOf(f, "v"), paidOn: str(f, "dt") || undefined, method: (str(f, "m") || "ACCOUNT"), notes: str(f, "notes") || null, accountId: str(f, "acc") || null } });
     const w = r.settlements?.at(-1)?.warnings ?? [];
     toast(w.length ? `Registrado com aviso: ${w.join("; ")}` : "Registrado.", w.length > 0);
   });
@@ -660,6 +663,147 @@ function settleDialog(personId: string, bal: number) {
   });
 }
 
+/* ===================== Bancos e dívidas ===================== */
+type AccType = "CHECKING" | "SAVINGS" | "INVESTMENT" | "CARD" | "LOAN" | "CASH";
+interface Acc { id: string; type: AccType; name: string; institution: string | null; ownerPersonId: string | null; ownerName: string; active: boolean; notes: string | null;
+  monthlyRateBp: number | null; rateSource: string | null; creditLimitCents: number | null; closingDay: number | null; dueDay: number | null;
+  openingBalanceCents: number; openingDate: string; balanceCents: number | null; openCents: number; openCount: number; availableLimitCents: number | null;
+  overdueCents: number; overdueCount: number; maxDaysOverdue: number; }
+interface OwnerRow { personId: string | null; name: string; cashCents: number; savedCents: number; cardsOpenCents: number; cardsLimitFreeCents: number;
+  debtCents: number; overdueCents: number; overdueCount: number; maxDaysOverdue: number; netWorthCents: number; }
+interface Payoff { totalCents: number; unknownRates: number; items: { titleId: string; name: string; ownerName: string; nature: string; openCents: number; dueDate: string | null;
+  daysOverdue: number; monthlyRateBp: number | null; institution: string | null; reasons: string[] }[]; }
+const ACC_TYPE: Record<AccType, string> = { CHECKING: "Conta / carteira digital", SAVINGS: "Poupança / reserva", INVESTMENT: "Investimento", CARD: "Cartão de crédito", LOAN: "Empréstimo / financiamento", CASH: "Dinheiro em espécie" };
+const BANKS = ["Nubank", "Inter", "Itaú", "Bradesco", "Banco do Brasil", "Caixa", "Santander", "C6 Bank", "Mercado Pago", "PicPay", "PagBank", "Cora", "Neon", "Will Bank",
+  "Banco Pan", "Sicoob", "Sicredi", "BTG", "XP", "Renner (Realize)", "Riachuelo", "C&A", "Magalu", "Casas Bahia", "Americanas", "Carrefour", "Atacadão", "Assaí"];
+const isCashAcc = (t: AccType) => t === "CHECKING" || t === "SAVINGS" || t === "INVESTMENT" || t === "CASH";
+const rateTxt = (bp: number | null) => (bp == null ? "juros não informado" : `${(bp / 100).toLocaleString("pt-BR")}% ao mês`);
+
+let bkOwner = ""; // "" = todos; "none" = dos dois; id da pessoa
+async function bancosPage() {
+  const q = bkOwner ? `?person=${bkOwner}` : "";
+  const [accs, ov, po] = await Promise.all([api<Acc[]>("/accounts"), api<{ people: OwnerRow[] }>("/overview"), api<Payoff>(`/payoff-order${q}`)]);
+  const owners = [{ id: "", name: "Todos" }, ...people.filter(p => p.active).map(p => ({ id: p.id, name: p.name })), { id: "none", name: "Dos dois / casa" }];
+  const shown = accs.filter(a => a.active && (bkOwner === "" || (bkOwner === "none" ? !a.ownerPersonId : a.ownerPersonId === bkOwner)));
+  const card = (o: OwnerRow) => `<div class="card">
+    <div class="row spread"><h3 style="margin:0">${esc(o.name)}</h3>${o.overdueCount ? `<span class="chip OVERDUE">${o.overdueCount} atrasada(s) · até ${o.maxDaysOverdue} dias</span>` : `<span class="chip SETTLED">nada atrasado</span>`}</div>
+    <div class="grid" style="margin:12px 0 0;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
+      <div class="kpi"><div class="l">Em conta</div><div class="v" style="font-size:18px">${money(o.cashCents)}</div></div>
+      <div class="kpi"><div class="l">Guardado</div><div class="v" style="font-size:18px">${money(o.savedCents)}</div></div>
+      <div class="kpi"><div class="l">Dívidas</div><div class="v neg" style="font-size:18px">${money(o.debtCents)}</div></div>
+      <div class="kpi"><div class="l">Atrasado</div><div class="v ${o.overdueCents ? "neg" : ""}" style="font-size:18px">${money(o.overdueCents)}</div></div>
+      <div class="kpi"><div class="l">Cartões abertos</div><div class="v" style="font-size:18px">${money(o.cardsOpenCents)}</div><div class="muted">limite livre ${money(o.cardsLimitFreeCents)}</div></div>
+      <div class="kpi"><div class="l">Patrimônio</div><div class="v ${o.netWorthCents < 0 ? "neg" : "pos"}" style="font-size:18px">${money(o.netWorthCents)}</div></div>
+    </div></div>`;
+  const item = (a: Acc) => `<div class="item">
+    <div class="head"><span class="who">${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}</span>
+      <span class="amt">${isCashAcc(a.type) ? money(a.balanceCents ?? 0) : money(a.openCents)}</span></div>
+    <div class="meta"><span class="chip">${ACC_TYPE[a.type]}</span><span class="chip person">👤 ${esc(a.ownerName)}</span>
+      ${a.overdueCount ? `<span class="chip OVERDUE">${a.overdueCount} atrasada(s) · ${a.maxDaysOverdue} dias · ${money(a.overdueCents)}</span>` : ""}
+      ${a.type === "CARD" || a.type === "LOAN" ? `<span class="chip ${a.monthlyRateBp == null ? "NO_VALUE" : ""}">${rateTxt(a.monthlyRateBp)}</span>` : ""}</div>
+    <div class="muted" style="margin-top:4px">${a.type === "CARD" ? `Limite ${a.creditLimitCents != null ? money(a.creditLimitCents) : "não informado"}${a.availableLimitCents != null ? ` · livre ${money(a.availableLimitCents)}` : ""}${a.closingDay ? ` · fecha dia ${a.closingDay}` : ""}${a.dueDay ? ` · vence dia ${a.dueDay}` : ""} · em aberto ${money(a.openCents)}`
+      : a.type === "LOAN" ? `${a.openCount} parcela(s) em aberto · ${money(a.openCents)}`
+      : `Saldo informado ${money(a.openingBalanceCents)} em ${br(a.openingDate)}`}${a.notes ? ` · ${esc(a.notes)}` : ""}</div>
+    <div class="actions"><button class="ghost sm" data-editacc="${a.id}">Editar</button>
+      ${a.type === "CARD" ? `<button class="ghost sm" data-bill="${a.id}">Nova fatura</button>` : ""}
+      ${isCashAcc(a.type) ? `<button class="ghost sm" data-transfer="${a.id}">Transferir</button>` : ""}
+      ${a.openCount ? `<button class="ghost sm" data-goto="pagar">Ver contas</button>` : ""}</div></div>`;
+  return `<div class="row spread"><h2>Bancos e dívidas</h2><button data-newacc>+ Adicionar</button></div>
+  <p class="muted">Cada banco pode ter só saldo, só dívida, conta e cartão… Cadastre produto por produto, com o dono. Informe o saldo de hoje; o sistema calcula o resto.</p>
+  <div class="person-tabs">${owners.map(o => `<button class="${bkOwner === o.id ? "on" : ""}" data-bkowner="${o.id}">${esc(o.name)}</button>`).join("")}</div>
+  ${ov.people.filter(o => bkOwner === "" || (bkOwner === "none" ? o.personId === null : o.personId === bkOwner)).map(card).join("")}
+  <h3 style="margin-top:20px">Produtos</h3>
+  <div class="list">${shown.map(item).join("") || `<div class="empty">Nada cadastrado ainda. Toque em "+ Adicionar".</div>`}</div>
+  <div class="card" style="margin-top:20px"><div class="row spread"><h3 style="margin:0">Ordem sugerida de pagamento</h3><span class="muted">total ${money(po.totalCents)}</span></div>
+    <p class="muted">Regra: primeiro o que está atrasado, depois os juros mais altos. ${po.unknownRates ? `<b>${po.unknownRates} item(ns) sem juros informado</b>: complete a taxa (está na fatura, campo CET) ou espere a pesquisa.` : ""}</p>
+    ${po.items.length ? `<ol class="payoff">${po.items.map(x => `<li><div class="row spread"><b>${esc(x.name)}</b><span class="${x.daysOverdue ? "neg" : ""}">${money(x.openCents)}</span></div>
+      <span class="muted">${esc(x.ownerName)} · ${x.dueDate ? `vence ${br(x.dueDate)}` : "sem data"} · ${x.reasons.map(esc).join(" · ")}</span></li>`).join("")}</ol>` : `<p class="muted">Nenhuma dívida em aberto.</p>`}</div>`;
+}
+
+function accForm(a?: Acc) {
+  const own = (sel: string | null | undefined) => `<option value="">Dos dois / casa</option>${people.filter(p => p.active).map(p => `<option value="${p.id}" ${sel === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}`;
+  const t = a?.type;
+  return `<datalist id="banks">${BANKS.map(b => `<option value="${b}">`).join("")}</datalist>
+    ${a ? "" : `<div class="full"><label>O que é</label><select name="type">${(Object.keys(ACC_TYPE) as AccType[]).map(k => `<option value="${k}">${ACC_TYPE[k]}</option>`).join("")}</select></div>`}
+    <div><label>Banco / app / loja</label><input name="inst" list="banks" maxlength="80" value="${esc(a?.institution)}" placeholder="ex.: Nubank"></div>
+    <div><label>Apelido</label><input name="name" required maxlength="80" value="${esc(a?.name ?? "")}" placeholder="ex.: Conta, Cartão roxo"></div>
+    <div class="full"><label>De quem</label><select name="owner">${own(a?.ownerPersonId ?? me?.personId)}</select></div>
+    <div data-f="cash"><label>Saldo de hoje (R$)</label><input name="bal" inputmode="decimal" value="${a ? moneyInput(a.openingBalanceCents) : "0,00"}"></div>
+    <div data-f="card"><label>Limite (R$)</label><input name="lim" inputmode="decimal" value="${a?.creditLimitCents != null ? moneyInput(a.creditLimitCents) : ""}"></div>
+    <div data-f="card"><label>Dia que fecha</label><input name="close" type="number" min="1" max="31" value="${a?.closingDay ?? ""}"></div>
+    <div data-f="card loan"><label>Dia que vence</label><input name="due" type="number" min="1" max="31" value="${a?.dueDay ?? ""}"></div>
+    ${a ? "" : `<div data-f="card"><label>Fatura atual (R$)</label><input name="bill" inputmode="decimal" placeholder="0,00"></div>
+    <div data-f="card"><label>Vencimento da fatura</label><input name="billdue" type="date"></div>
+    <div data-f="loan"><label>Valor da parcela (R$)</label><input name="inst_v" inputmode="decimal"></div>
+    <div data-f="loan"><label>Parcelas que faltam</label><input name="rem" type="number" min="1" max="480"></div>
+    <div data-f="loan"><label>Total de parcelas (se souber)</label><input name="tot" type="number" min="1" max="480"></div>
+    <div data-f="loan"><label>Vencimento da parcela mais antiga em aberto</label><input name="first" type="date"></div>
+    <p class="muted full" data-f="loan">Se há parcelas atrasadas, informe a data da mais antiga: o sistema mostra o atraso sozinho.</p>`}
+    <div data-f="card loan"><label>Juros ao mês (%)</label><input name="rate" inputmode="decimal" placeholder="se souber" value="${a?.monthlyRateBp != null ? String(a.monthlyRateBp / 100).replace(".", ",") : ""}"></div>
+    <div data-f="card loan"><label>Fonte dos juros</label><input name="src" maxlength="80" placeholder="ex.: fatura (CET)" value="${esc(a?.rateSource)}"></div>
+    <div class="full"><label>Observação</label><input name="notes" maxlength="300" value="${esc(a?.notes)}"></div>
+    ${a ? `<label class="inline full"><input type="checkbox" name="active" ${a.active ? "checked" : ""}> Ativo</label>` : ""}`;
+}
+function wireAccForm(fixed?: AccType) {
+  const sel = dlgForm.querySelector<HTMLSelectElement>("select[name=type]");
+  const apply = () => {
+    const t = (fixed ?? sel?.value) as AccType, kind = isCashAcc(t) ? "cash" : t === "CARD" ? "card" : "loan";
+    dlgForm.querySelectorAll<HTMLElement>("[data-f]").forEach(e => (e.hidden = !e.dataset.f!.split(" ").includes(kind)));
+  };
+  sel?.addEventListener("change", apply); apply();
+}
+const rateOf = (f: FormData) => { const v = str(f, "rate").replace(",", "."); if (!v) return null; const n = Math.round(Number(v) * 100); if (!Number.isFinite(n) || n < 0) throw new ApiError(400, "INVALID", "Juros inválido."); return n; };
+const intOf = (f: FormData, k: string) => (str(f, k) ? Number(str(f, k)) : null);
+function newAccount() {
+  openDialog("Adicionar banco, cartão ou dívida", accForm(), "Salvar", async f => {
+    const type = str(f, "type") as AccType;
+    const body: Record<string, unknown> = { type, name: str(f, "name"), institution: str(f, "inst") || null, ownerPersonId: str(f, "owner") || null,
+      notes: str(f, "notes") || null };
+    if (isCashAcc(type)) body.openingBalanceCents = centsOf(f, "bal", false) ?? 0;
+    if (type === "CARD" || type === "LOAN") Object.assign(body, { monthlyRateBp: rateOf(f), rateSource: str(f, "src") || null, dueDay: intOf(f, "due") });
+    if (type === "CARD") {
+      Object.assign(body, { creditLimitCents: centsOf(f, "lim", false), closingDay: intOf(f, "close") });
+      const bill = centsOf(f, "bill", false);
+      if (bill) { if (!str(f, "billdue")) throw new ApiError(400, "INVALID", "Informe o vencimento da fatura."); body.currentBill = { amountCents: bill, dueDate: str(f, "billdue") }; }
+    }
+    if (type === "LOAN") {
+      if (!str(f, "inst_v") || !str(f, "rem") || !str(f, "first")) throw new ApiError(400, "INVALID", "Informe parcela, quantas faltam e o vencimento da mais antiga em aberto.");
+      body.loan = { installmentCents: centsOf(f, "inst_v"), remaining: Number(str(f, "rem")), firstOpenDueDate: str(f, "first"), totalInstallments: intOf(f, "tot") };
+    }
+    await api("/accounts", { method: "POST", body });
+    toast("Cadastrado.");
+  });
+  wireAccForm();
+}
+async function editAccount(id: string) {
+  const a = (await api<Acc[]>("/accounts")).find(x => x.id === id); if (!a) return;
+  openDialog(`Editar · ${a.institution ?? ""} ${a.name}`, accForm(a), "Salvar", async f => {
+    const body: Record<string, unknown> = { name: str(f, "name"), institution: str(f, "inst") || null, ownerPersonId: str(f, "owner") || null, notes: str(f, "notes") || null, active: f.has("active") };
+    if (isCashAcc(a.type)) body.openingBalanceCents = centsOf(f, "bal", false) ?? 0;
+    if (a.type === "CARD" || a.type === "LOAN") Object.assign(body, { monthlyRateBp: rateOf(f), rateSource: str(f, "src") || null, dueDay: intOf(f, "due") });
+    if (a.type === "CARD") Object.assign(body, { creditLimitCents: centsOf(f, "lim", false), closingDay: intOf(f, "close") });
+    await api(`/accounts/${id}`, { method: "PATCH", body });
+    toast("Alterado.");
+  });
+  wireAccForm(a.type);
+}
+function billDialog(id: string) {
+  openDialog("Nova fatura do cartão", `<div><label>Valor da fatura (R$)</label><input name="v" inputmode="decimal" required></div>
+    <div><label>Vencimento</label><input name="d" type="date" required></div>`, "Salvar", async f => {
+    await api(`/accounts/${id}/bill`, { method: "POST", body: { amountCents: centsOf(f, "v"), dueDate: str(f, "d") } });
+    toast("Fatura lançada em Contas a pagar.");
+  });
+}
+async function transferDialog(fromId: string) {
+  const accs = (await api<Acc[]>("/accounts")).filter(a => a.active && isCashAcc(a.type) && a.id !== fromId);
+  openDialog("Transferir entre contas", `<div class="full"><label>Para</label><select name="to" required>${accs.map(a => `<option value="${a.id}">${esc(a.ownerName)} · ${esc(a.institution ?? "")} ${esc(a.name)}</option>`).join("")}</select></div>
+    <div><label>Valor (R$)</label><input name="v" inputmode="decimal" required></div><div><label>Data</label><input name="d" type="date" value="${today()}"></div>
+    <p class="muted full">Transferência entre contas de vocês não é receita nem despesa.</p>`, "Transferir", async f => {
+    await api("/transfers", { method: "POST", body: { fromAccountId: fromId, toAccountId: str(f, "to"), amountCents: centsOf(f, "v"), day: str(f, "d") || undefined } });
+    toast("Transferência registrada.");
+  });
+}
+
 /* ===================== Ranking ===================== */
 interface RankRow { personId: string | null; name: string; nickname: string | null; totalCents: number; allCents: number; mandatoryCents: number; count: number; previousCents: number; topCategories: { category: string; cents: number }[]; }
 interface Ranking { week: { start: string; end: string }; mandatoryCategories: string[]; totalCents: number; mandatoryCents: number; board: RankRow[];
@@ -892,6 +1036,11 @@ view.addEventListener("click", async e => {
     else if (d.check) { await api("/conduct/checks", { method: "POST", body: { personId: d.person, ruleId: d.check, day: d.day, checked: d.val === "true" } }); await render(); }
     else if (d.cbweek !== undefined) { const n = Number(d.cbweek); if (n === 0) cbDate = today(); else { const x = new Date(`${cbDate}T12:00:00`); x.setDate(x.getDate() + n); cbDate = x.toLocaleDateString("sv-SE"); } await render(); }
     else if (d.infraction !== undefined) await infractionDialog();
+    else if (d.newacc !== undefined) newAccount();
+    else if (d.editacc) await editAccount(d.editacc);
+    else if (d.bill) billDialog(d.bill);
+    else if (d.transfer) await transferDialog(d.transfer);
+    else if (d.bkowner !== undefined) { bkOwner = d.bkowner; await render(); }
     else if (d.cbperson !== undefined) { cbView = d.cbperson; scrollTo(0, 0); await render(); }
     else if (d.sporadic) { await api("/conduct/sporadic", { method: "POST", body: { ruleId: d.sporadic, personId: d.person, day: today(), active: d.val === "true" } }); toast(d.val === "true" ? "Tarefa ativada para hoje." : "Tarefa desativada."); await render(); }
     else if (d.blame) await blameDialog(d.blame, d.person!, d.day!);
