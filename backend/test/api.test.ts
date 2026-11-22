@@ -1122,5 +1122,12 @@ describe("Importar gastos (cupons lidos no chat)", () => {
     const bill = (await req("GET", `${P}/titles?status=open`)).json.find((t: { counterparty: string }) => t.counterparty.includes("Banco Cupom · Cartão cupom"));
     expect(bill.amountCents).toBe(2300); // foi para a fatura do cartão
     expect((await req("POST", `${P}/import/accounts`, file)).json.rows.slice(0, 2).every((r: { status: string }) => r.status === "ja_existe")).toBe(true);
+    // lançado à mão com outro nome (mesmo valor, dia e pessoa) → provável duplicado, não entra
+    const ppl = (await req("GET", `${P}/people`)).json as { id: string; name: string }[];
+    const thais = ppl.find(p => p.name === "Thaís")!.id;
+    await req("POST", `${P}/expenses/quick`, { amountCents: 7777, description: "mercado", category: "ALIMENTACAO", date: d, personId: thais });
+    const cupom = { version: 1, items: [{ type: "EXPENSE", description: "Supermercado Big", amountCents: 7777, date: d, category: "ALIMENTACAO", owner: "Thaís" }] };
+    const p2 = (await req("POST", `${P}/import/accounts?dryRun=1`, cupom)).json.rows[0];
+    expect(p2.status).toBe("ja_existe"); expect(p2.summary).toContain('provável duplicado de "mercado"');
   });
 });

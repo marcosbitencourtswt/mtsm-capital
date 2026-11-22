@@ -335,11 +335,17 @@ export async function importAccounts(db: Db, e: Entity, u: SessionUser, items: I
         const category = String(rr.category ?? "OUTROS").toUpperCase();
         const summary = `${fmt(amount)} em ${date.split("-").reverse().join("/")} · ${category}${acc ? ` · ${acc.type === "CARD" ? "cartão" : "conta"} ${String(rr.account)}` : ""}`;
         const key = `EXP|${desc.toLowerCase()}|${amount}|${date}`;
-        const dup = seen.has(key) || (await db.query(`SELECT 1 FROM title t JOIN settlement s ON s.title_id = t.id WHERE t.entity_code = $1 AND t.kind = 'PAYABLE'
-          AND t.nature = 'EXPENSE' AND lower(t.counterparty) = $2 AND s.amount_cents = $3 AND s.paid_on = $4 AND t.deleted_at IS NULL AND s.deleted_at IS NULL LIMIT 1`,
-          [e, desc.toLowerCase(), amount, date])).rowCount;
+        // Duplicado: mesmo valor, data ±1 dia e mesma pessoa OU mesma conta/cartão — pega o "mercado" lançado à mão
+        // e o "Pedido: caderno" aprovado, mesmo com descrição diferente da do cupom.
+        const like = seen.has(key) ? null : (await db.query<{ counterparty: string; d: string }>(`SELECT t.counterparty, s.paid_on::text AS d FROM title t JOIN settlement s ON s.title_id = t.id
+          LEFT JOIN title b ON b.id = t.card_bill_id
+          WHERE t.entity_code = $1 AND t.kind = 'PAYABLE' AND t.nature = 'EXPENSE' AND s.method <> 'DISCOUNT' AND t.deleted_at IS NULL AND s.deleted_at IS NULL
+            AND s.amount_cents = $2 AND s.paid_on BETWEEN $3::date - 1 AND $3::date + 1
+            AND (lower(t.counterparty) = $4 OR ($5::uuid IS NOT NULL AND t.person_id = $5) OR ($6::uuid IS NOT NULL AND (s.account_id = $6 OR b.account_id = $6)))
+          LIMIT 1`, [e, amount, date, desc.toLowerCase(), p?.id ?? null, acc?.id ?? null])).rows[0];
+        const dup = seen.has(key) || !!like;
         seen.add(key);
-        if (dup) { out.push({ ...base, status: "ja_existe", summary }); continue; }
+        if (dup) { out.push({ ...base, status: "ja_existe", summary: like ? `${summary} · provável duplicado de "${like.counterparty}" (${like.d.split("-").reverse().join("/")})` : summary }); continue; }
         if (!dryRun) await quickExpense(db, e, { amountCents: amount, category, description: desc, date, personId: p?.id ?? null, createdBy: u.id,
           ...(acc ? (acc.type === "CARD" ? { cardAccountId: acc.id } : { accountId: acc.id }) : {}) });
         out.push({ ...base, status: "novo", summary });
