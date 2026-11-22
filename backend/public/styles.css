@@ -319,3 +319,7 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
 .bar.budget.over i { background: var(--danger); }
 @media (max-width: 699px) { .pending-card .st-grid { grid-template-columns: 1fr; } }
 .saving { padding: 8px 10px; border-radius: var(--radius-sm); background: var(--success-soft); font-size: 14px; }
+.more-toggle { opacity: .85; }
+.more-toggle.open { opacity: 1; }
+#more-tabs { display: contents; }
+#more-tabs[hidden] { display: none !important; }

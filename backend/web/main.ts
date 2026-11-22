@@ -25,7 +25,14 @@ const isAdmin = () => me?.role === "ADMIN";
 const isGuardian = () => isAdmin() || !!me?.isGuardian;
 const isRoot = () => !!me?.isRoot;
 const mine = (createdBy: string | null | undefined) => isAdmin() || (!!createdBy && createdBy === me?.id);
-const catOptions = (sel?: string) => CATEGORIES.map(c => `<option ${c === sel ? "selected" : ""}>${c}</option>`).join("");
+/** Código fica igual por dentro (dados não mudam); a tela mostra o nome legível. */
+const CAT_LABEL: Record<string, string> = { ALIMENTACAO: "Alimentação", MORADIA: "Moradia", AGUA: "Água", LUZ: "Luz", INTERNET: "Internet", FIXO: "Fixo",
+  TRANSPORTE: "Transporte", SAUDE: "Saúde", EDUCACAO: "Educação", DELIVERY: "Delivery", RESTAURANTE: "Restaurante", LAZER: "Lazer", ROUPAS: "Roupas",
+  BELEZA: "Beleza", PRESENTES: "Presentes", ASSINATURAS: "Assinaturas", DIVIDA: "Dívida", CARTAO: "Cartão", MESADA: "Mesada", IMPOSTOS: "Impostos",
+  PRO_LABORE: "Pró-labore", RENDA: "Renda", VENDAS: "Vendas", SERVICOS: "Serviços", OUTROS: "Outros" };
+const catLabel = (c: string) => CAT_LABEL[c] ?? c.charAt(0) + c.slice(1).toLowerCase().replace(/_/g, " ");
+const catOptions = (sel?: string) => [...CATEGORIES, ...(sel && !CATEGORIES.includes(sel) ? [sel] : [])]
+  .map(c => `<option value="${esc(c)}" ${c === sel ? "selected" : ""}>${esc(catLabel(c))}</option>`).join("");
 
 /* Pessoas da casa: cache usado nos formulários */
 let people: Person[] = [];
@@ -73,10 +80,15 @@ scrim.addEventListener("click", () => menu(false));
 async function render() {
   if (me?.conductOnly && tab !== "combinados" && tab !== "pedidos") tab = "combinados";
   document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  if (moreBox.querySelector(`[data-tab="${tab}"]`)) setMore(true);
   $("#page-title").textContent = TITLES[tab]; document.title = `${TITLES[tab]} · NOFINANCE`;
   try { await loadPeople(); view.innerHTML = await renderers[tab](); }
   catch (e) { view.innerHTML = `<div class="alert danger">${esc(e instanceof ApiError ? e.message : "Sem conexão com a API. Confira se o npm run dev está rodando.")}</div>`; }
 }
+/** "Mais": telas menos usadas ficam recolhidas; abrem sozinhas se a tela atual estiver lá. */
+const moreBtn = $<HTMLButtonElement>("#more-btn"), moreBox = $("#more-tabs");
+const setMore = (open: boolean) => { moreBox.hidden = !open; moreBtn.setAttribute("aria-expanded", String(open)); moreBtn.classList.toggle("open", open); };
+moreBtn.addEventListener("click", () => setMore(moreBox.hidden));
 $("#tabs").addEventListener("click", e => {
   const t = (e.target as HTMLElement).dataset.tab as Tab | undefined;
   if (t) { tab = t; menu(false); history.pushState(null, "", `#${t}`); scrollTo(0, 0); render(); }
@@ -194,7 +206,7 @@ function titleItem(t: Title) {
   return `<div class="item">
     <div class="head"><span class="who">${esc(t.counterparty)}</span><span class="amt">${money(t.openCents)}</span></div>
     <div class="meta">
-      <span class="chip ${t.status}">${STATUS[t.status]}</span><span class="chip">${NATURE[t.nature]}</span><span class="chip">${esc(t.category)}</span>
+      <span class="chip ${t.status}">${STATUS[t.status]}</span><span class="chip">${NATURE[t.nature]}</span><span class="chip">${esc(catLabel(t.category))}</span>
       ${t.personName ? `<span class="chip person">👤 ${esc(t.personName)}</span>` : ""}
       <span class="muted">vence ${br(t.dueDate)}</span>
       ${t.rateBp ? `<span class="chip">${pct(t.rateBp)} juros</span>` : ""}
@@ -424,7 +436,7 @@ async function config() {
   <p class="muted">Geradas todo mês sozinhas (mês atual e próximo). Sem valor padrão, a conta nasce "sem valor" e o 1º pagamento define; o mês seguinte usa o último valor.</p>
   <div class="list">${recs.length ? recs.map(r => `<div class="item">
     <div class="head"><span class="who">${esc(r.description)}</span><span class="amt">${r.defaultAmountCents != null ? money(r.defaultAmountCents) : "varia"}</span></div>
-    <div class="meta"><span class="chip">${r.kind === "PAYABLE" ? "A pagar" : "A receber"}</span><span class="chip">${esc(r.category)}</span>
+    <div class="meta"><span class="chip">${r.kind === "PAYABLE" ? "A pagar" : "A receber"}</span><span class="chip">${esc(catLabel(r.category))}</span>
       ${r.personName ? `<span class="chip person">👤 ${esc(r.personName)}</span>` : ""}
       <span class="muted">dia ${r.dueDay ?? "—"} · desde ${br(r.startMonth).slice(3)}</span>${r.active ? "" : `<span class="chip OVERDUE">pausada</span>`}</div>
     ${isAdmin() ? `<div class="actions"><button class="ghost sm" data-editrec="${r.id}">Editar</button>
@@ -486,7 +498,7 @@ async function pessoas() {
       <span class="amt">${money(p.paidCents)}</span></div>
     <div class="meta"><span class="muted">pago no mês · ${share(p.paidCents)}% do total</span>
       ${p.openCents ? `<span class="chip OPEN">em aberto ${money(p.openCents)} (${p.openCount})</span>` : ""}</div>
-    ${p.byCategory.length ? `<div class="muted" style="margin-top:6px">${p.byCategory.slice(0, 5).map(c => `${esc(c.category)} ${money(c.cents)}`).join(" · ")}</div>` : ""}
+    ${p.byCategory.length ? `<div class="muted" style="margin-top:6px">${p.byCategory.slice(0, 5).map(c => `${esc(catLabel(c.category))} ${money(c.cents)}`).join(" · ")}</div>` : ""}
     <div class="actions"><button class="ghost sm" data-seeperson="${p.personId ?? "none"}">Ver contas</button>
       ${p.personId && isAdmin() ? `<button class="ghost sm" data-editperson="${p.personId}">Editar</button>
       <button class="ghost sm" data-toggleperson="${p.personId}" data-active="${p.active}">${p.active ? "Desativar" : "Reativar"}</button>` : ""}</div>
@@ -797,7 +809,7 @@ async function pedidosPage() {
     ${r.requestedBy === me?.id && r.status === "PENDING" ? `<div class="row"><button class="ghost sm" data-reqcancel="${r.id}">Cancelar pedido</button></div>` : ""}
     ${r.requestedBy === me?.id && r.status === "REJECTED" ? `<div class="row"><button class="ghost sm" data-reqagain="${r.id}">Pedir de novo</button></div>` : ""}</li>`;
   const decide = (r: PReq) => `<li><div><b>${esc(r.requestedByName)}</b>${r.forPersonName && r.forPersonName !== r.requestedByName ? ` (para ${esc(r.forPersonName)})` : ""} pede:
-      <b>${esc(r.description)}</b> · <b>${money(r.amountCents)}</b> <span class="muted">· ${esc(r.category)} · ${br(r.createdAt.slice(0, 10))}</span></div>
+      <b>${esc(r.description)}</b> · <b>${money(r.amountCents)}</b> <span class="muted">· ${esc(catLabel(r.category))} · ${br(r.createdAt.slice(0, 10))}</span></div>
     <div class="st-grid"><select id="racc-${r.id}" aria-label="De onde sai">${opts(r.accountId)}</select><input id="rnote-${r.id}" placeholder="Recado (obrigatório se recusar)" maxlength="200"></div>
     <div class="row"><button class="sm" data-reqok="${r.id}">Aprovar e lançar</button><button class="ghost sm" data-reqno="${r.id}">Recusar</button></div></li>`;
   const p = reqPrefill; reqPrefill = {};
@@ -825,15 +837,15 @@ let budgetCache: Budget | null = null;
 function budgetCard(b: Budget | null) {
   if (!b || !b.items.length) return "";
   return `<div class="card"><div class="row spread"><h3 style="margin:0">Orçamento do mês</h3><span class="muted">${b.monthElapsedPct}% do mês passou</span></div>
-    <ul class="imp">${b.items.map(i => `<li><div class="row spread"><b>${esc(i.category)}</b><span class="${i.pct >= 100 ? "neg" : ""}">${money(i.spentCents)} de ${money(i.limitCents)}</span></div>
-      <div class="bar budget ${i.pct >= 100 ? "over" : i.pct >= 80 ? "warn" : ""}" role="progressbar" aria-valuenow="${i.pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(i.category)}"><i style="width:${Math.min(100, i.pct)}%"></i></div>
+    <ul class="imp">${b.items.map(i => `<li><div class="row spread"><b>${esc(catLabel(i.category))}</b><span class="${i.pct >= 100 ? "neg" : ""}">${money(i.spentCents)} de ${money(i.limitCents)}</span></div>
+      <div class="bar budget ${i.pct >= 100 ? "over" : i.pct >= 80 ? "warn" : ""}" role="progressbar" aria-valuenow="${i.pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(catLabel(i.category))}"><i style="width:${Math.min(100, i.pct)}%"></i></div>
       <div class="muted">${i.leftCents >= 0 ? `sobram ${money(i.leftCents)}` : `<span class="neg">passou ${money(-i.leftCents)}</span>`}${i.pct > b.monthElapsedPct + 10 && i.pct < 100 ? " · ritmo acima do mês" : ""}</div></li>`).join("")}</ul></div>`;
 }
 function budgetForm(b: Budget) {
   const lim = new Map(b.items.map(i => [i.category, i.limitCents]));
   return `<div class="card"><h3>Orçamento por categoria</h3>
     <p class="muted">Defina um teto mensal só nas categorias que quer vigiar (deixe vazio nas outras). O Painel mostra a barra e vocês dois recebem aviso ao passar de 80% e de 100%.</p>
-    <form class="form" id="budget-f">${SPEND_CATS.map(c => `<div><label>${c}</label><input name="b_${c}" inputmode="decimal" placeholder="sem teto" value="${lim.has(c) ? moneyInput(lim.get(c)!) : ""}"></div>`).join("")}
+    <form class="form" id="budget-f">${SPEND_CATS.map(c => `<div><label>${esc(catLabel(c))}</label><input name="b_${c}" inputmode="decimal" placeholder="sem teto" value="${lim.has(c) ? moneyInput(lim.get(c)!) : ""}"></div>`).join("")}
       <div class="full"><button>Salvar orçamento</button></div></form></div>`;
 }
 
@@ -1056,7 +1068,7 @@ async function rankingPage() {
     <span class="val">${money(r.totalCents)}</span>
     <div class="bar"><i style="width:${Math.round(r.totalCents / max * 100)}%"></i></div>
     <span class="sub">${r.count} gasto(s) · ${delta(r)}</span>
-    ${r.topCategories.length ? `<span class="sub">${r.topCategories.map(c => `${esc(c.category)} ${money(c.cents)}`).join(" · ")}</span>` : ""}
+    ${r.topCategories.length ? `<span class="sub">${r.topCategories.map(c => `${esc(catLabel(c.category))} ${money(c.cents)}`).join(" · ")}</span>` : ""}
     <span class="sub">Com obrigatórios: ${money(r.allCents)}</span>
     ${hist(r.personId)}
   </div>`).join("") || `<div class="empty">Ninguém cadastrado em Pessoas da casa.</div>`}</div>
@@ -1064,7 +1076,7 @@ async function rankingPage() {
     ${rk.items.length ? `<div class="scroll"><table><tr><th>Gasto</th><th>Valor</th><th>Pessoa</th><th>Classificação</th><th>Categoria</th><th>Data</th></tr>
     ${rk.items.map(i => `<tr><td>${esc(i.counterparty)}</td><td>${money(i.amountCents)}</td><td>${esc(i.personName ?? "Sem pessoa")}</td>
       <td>${isAdmin() ? `<button class="ghost sm" data-mand="${i.titleId}" data-val="${!i.mandatory}">${i.mandatory ? "Obrigatório" : "Não obrigatório"}${i.reviewed ? " ✓" : ""}</button>`
-        : `<span class="chip ${i.mandatory ? "SETTLED" : "OPEN"}">${i.mandatory ? "Obrigatório" : "Não obrigatório"}</span>`}</td><td>${esc(i.category)}</td><td>${br(i.paidOn)}</td></tr>`).join("")}
+        : `<span class="chip ${i.mandatory ? "SETTLED" : "OPEN"}">${i.mandatory ? "Obrigatório" : "Não obrigatório"}</span>`}</td><td>${esc(catLabel(i.category))}</td><td>${br(i.paidOn)}</td></tr>`).join("")}
     </table></div>` : `<p class="muted">Nenhum gasto pago nesta semana.</p>`}
     ${isAdmin() ? `<p class="muted">Toque na classificação para revisar (✓ = revisado por você).</p>` : ""}</div>
   <div class="card"><div class="row spread"><h3 style="margin:0">Categorias obrigatórias</h3>${isAdmin() ? `<button class="ghost sm" data-editcats>Alterar</button>` : ""}</div>
@@ -1329,6 +1341,7 @@ function renderMe() {
   $("#tab-admin").hidden = !isAdmin();
   const conly = !!me?.conductOnly;
   document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => { if (b.id !== "tab-admin") b.hidden = conly && b.dataset.tab !== "combinados" && b.dataset.tab !== "pedidos"; });
+  moreBtn.hidden = conly;
   if (conly && tab !== "pedidos") { tab = "combinados"; if (location.hash !== "#combinados") history.replaceState(null, "", "#combinados"); }
   if (!isAdmin() && tab === "admin") tab = "painel";
   if (!isAdmin() && getEntity() !== "personal") { setEntity("personal"); entSel.value = "personal"; }

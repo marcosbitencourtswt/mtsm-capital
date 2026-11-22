@@ -935,12 +935,12 @@ describe("Orçamento por categoria", () => {
     expect((await req("PUT", `${P}/budget/DELIVERY`, { limitCents: 10000 })).status).toBe(200);
     const gasto = (v: number) => req("POST", `${P}/expenses/quick`, { amountCents: v, description: "Lanche app", category: "DELIVERY", date: d });
     await gasto(5000);
-    expect(sent.filter(t => t.includes("DELIVERY"))).toEqual([]);
+    expect(sent.filter(t => t.includes("Delivery"))).toEqual([]);
     await gasto(3500); // 85%
     await gasto(500);  // 90%: não repete o de 80%
-    expect(sent.filter(t => t.includes("DELIVERY"))).toEqual(["Orçamento em 80%: DELIVERY"]);
+    expect(sent.filter(t => t.includes("Delivery"))).toEqual(["Orçamento em 80%: Delivery"]);
     await gasto(2000); // 110%
-    expect(sent.filter(t => t.includes("DELIVERY"))).toEqual(["Orçamento em 80%: DELIVERY", "Orçamento estourado: DELIVERY"]);
+    expect(sent.filter(t => t.includes("Delivery"))).toEqual(["Orçamento em 80%: Delivery", "Orçamento estourado: Delivery"]);
     const b = (await req("GET", `${P}/budget`)).json;
     expect(b.items.find((i: { category: string }) => i.category === "DELIVERY")).toMatchObject({ limitCents: 10000, spentCents: 11000, leftCents: -1000, pct: 110 });
     // membro comum não muda o orçamento; tirar o teto remove da lista

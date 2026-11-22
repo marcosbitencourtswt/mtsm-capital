@@ -8,6 +8,10 @@ import { todaySP } from "./domain/finance.js";
 import type { Entity } from "./service.js";
 
 const monthStart = (d: string) => `${d.slice(0, 7)}-01`;
+const LABEL: Record<string, string> = { ALIMENTACAO: "Alimentação", AGUA: "Água", SAUDE: "Saúde", EDUCACAO: "Educação", DIVIDA: "Dívida", CARTAO: "Cartão",
+  PRO_LABORE: "Pró-labore", SERVICOS: "Serviços" };
+/** Nome legível da categoria para avisos (DELIVERY → Delivery, SAUDE → Saúde). */
+export const categoryLabel = (c: string) => LABEL[c] ?? c.charAt(0) + c.slice(1).toLowerCase().replace(/_/g, " ");
 
 async function spent(db: Db, e: Entity, month: string, categories?: string[]) {
   const r = await db.query<{ category: string; v: string }>(`SELECT t.category, sum(s.amount_cents)::bigint AS v FROM settlement s JOIN title t ON t.id = s.title_id

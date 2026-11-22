@@ -193,7 +193,7 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
       const brl = (v: number) => (v / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
       const to = await push.guardians(db);
       let n = 0;
-      for (const h of hits) n += await push.notify(db, to, { title: h.level === 100 ? `Orçamento estourado: ${h.category}` : `Orçamento em 80%: ${h.category}`,
+      for (const h of hits) n += await push.notify(db, to, { title: h.level === 100 ? `Orçamento estourado: ${budget.categoryLabel(h.category)}` : `Orçamento em 80%: ${budget.categoryLabel(h.category)}`,
         body: `${brl(h.spentCents)} de ${brl(h.limitCents)} no mês.`, url: "/#painel", tag: `orc-${h.category}` });
       return n;
     });
