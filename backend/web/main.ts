@@ -3,6 +3,33 @@ import qrcode from "qrcode-generator";
 import { lineChart, hBars, vBars, wireTooltips, chartSlot, paintCharts, resetCharts } from "./charts.js";
 import { money, parseMoney, moneyInput, today, br, monthLabel, addMonths, pct, esc } from "./fmt.js";
 
+/** Estado da tela num lugar só (quem está logado, filtros, mês escolhido...). */
+const st = {
+  me: null as Me | null,
+  people: [] as Person[],
+  tab: (location.hash.slice(1) as Tab) || "painel" as Tab,
+  statusFilter: "open" as "open" | "settled" | "all",
+  personFilter: "",
+  extFrom: addMonths(today().slice(0, 7), -5),
+  extTo: today().slice(0, 7),
+  projMonths: 12,
+  simCache: "",
+  peopleMonth: today().slice(0, 7),
+  pendingCache: [] as Pending[],
+  cbDate: today(),
+  cbView: "",
+  bkOwner: "",
+  bkStrategy: "juros" as "juros" | "rapidas" | "nome",
+  repMonth: today().slice(0, 7),
+  reqPrefill: {} as { d?: string; v?: number; c?: string },
+  budgetCache: null as Budget | null,
+  trCache: [] as Transfer[],
+  rkDate: today(),
+  usersCache: [] as UserRow[],
+  auditQ: { actor: "", area: "", from: "", to: "" },
+  mfaChallenge: "",
+};
+
 /* ===================== Infra de UI ===================== */
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
 const view = $("#view");
@@ -19,13 +46,10 @@ const NATURE: Record<string, string> = { EXPENSE: "Conta", DEBT: "Dívida", CARD
 const STATUS: Record<string, string> = { OPEN: "Em aberto", OVERDUE: "Vencida", SETTLED: "Quitada", NO_VALUE: "Sem valor" };
 const CATEGORIES = ["ALIMENTACAO", "MORADIA", "AGUA", "LUZ", "INTERNET", "FIXO", "TRANSPORTE", "SAUDE", "EDUCACAO",
   "DELIVERY", "RESTAURANTE", "LAZER", "ROUPAS", "BELEZA", "PRESENTES", "ASSINATURAS", "DIVIDA", "CARTAO", "MESADA", "IMPOSTOS", "PRO_LABORE", "LUCROS", "RENDA", "VENDAS", "SERVICOS", "OUTROS"];
-
-/* Usuário logado */
-let me: Me | null = null;
-const isAdmin = () => me?.role === "ADMIN";
-const isGuardian = () => isAdmin() || !!me?.isGuardian;
-const isRoot = () => !!me?.isRoot;
-const mine = (createdBy: string | null | undefined) => isAdmin() || (!!createdBy && createdBy === me?.id);
+const isAdmin = () => st.me?.role === "ADMIN";
+const isGuardian = () => isAdmin() || !!st.me?.isGuardian;
+const isRoot = () => !!st.me?.isRoot;
+const mine = (createdBy: string | null | undefined) => isAdmin() || (!!createdBy && createdBy === st.me?.id);
 /** Código fica igual por dentro (dados não mudam); a tela mostra o nome legível. */
 const CAT_LABEL: Record<string, string> = { ALIMENTACAO: "Alimentação", MORADIA: "Moradia", AGUA: "Água", LUZ: "Luz", INTERNET: "Internet", FIXO: "Fixo",
   TRANSPORTE: "Transporte", SAUDE: "Saúde", EDUCACAO: "Educação", DELIVERY: "Delivery", RESTAURANTE: "Restaurante", LAZER: "Lazer", ROUPAS: "Roupas",
@@ -34,12 +58,9 @@ const CAT_LABEL: Record<string, string> = { ALIMENTACAO: "Alimentação", MORADI
 const catLabel = (c: string) => CAT_LABEL[c] ?? c.charAt(0) + c.slice(1).toLowerCase().replace(/_/g, " ");
 const catOptions = (sel?: string) => [...CATEGORIES, ...(sel && !CATEGORIES.includes(sel) ? [sel] : [])]
   .map(c => `<option value="${esc(c)}" ${c === sel ? "selected" : ""}>${esc(catLabel(c))}</option>`).join("");
-
-/* Pessoas da casa: cache usado nos formulários */
-let people: Person[] = [];
-const loadPeople = async () => { people = await api<Person[]>("/people"); return people; };
+const loadPeople = async () => { st.people = await api<Person[]>("/people"); return st.people; };
 const personOptions = (sel?: string | null, includeInactive = false) =>
-  `<option value="">Casa / geral</option>` + people.filter(p => p.active || includeInactive || p.id === sel)
+  `<option value="">Casa / geral</option>` + st.people.filter(p => p.active || includeInactive || p.id === sel)
     .map(p => `<option value="${p.id}" ${p.id === sel ? "selected" : ""}>${esc(p.name)}${p.active ? "" : " (inativa)"}</option>`).join("");
 const personSelect = (sel?: string | null) => `<div><label>Pessoa</label><select name="person">${personOptions(sel)}</select></div>`;
 
@@ -70,7 +91,6 @@ function centsOf(f: FormData, k: string, required = true): number | null {
 
 /* ===================== Roteamento ===================== */
 type Tab = "painel" | "admin" | "bancos" | "combinados" | "pedidos" | "indicadores" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
-let tab: Tab = (location.hash.slice(1) as Tab) || "painel";
 const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, bancos: bancosPage, combinados: combinadosPage, pedidos: pedidosPage, indicadores: indicadoresPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
 const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", bancos: "Bancos e dívidas", combinados: "Combinados", pedidos: "Pedidos de compra", indicadores: "Indicadores", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
 const side = $("#side"), scrim = $("#scrim");
@@ -79,11 +99,11 @@ $("#menu-btn").addEventListener("click", () => menu(true));
 scrim.addEventListener("click", () => menu(false));
 
 async function render() {
-  if (me?.conductOnly && tab !== "combinados" && tab !== "pedidos") tab = "combinados";
-  document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
-  if (moreBox.querySelector(`[data-tab="${tab}"]`)) setMore(true);
-  $("#page-title").textContent = TITLES[tab]; document.title = `${TITLES[tab]} · NOFINANCE`;
-  try { await loadPeople(); resetCharts(); view.innerHTML = await renderers[tab](); paintCharts(view); }
+  if (st.me?.conductOnly && st.tab !== "combinados" && st.tab !== "pedidos") st.tab = "combinados";
+  document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === st.tab));
+  if (moreBox.querySelector(`[data-tab="${st.tab}"]`)) setMore(true);
+  $("#page-title").textContent = TITLES[st.tab]; document.title = `${TITLES[st.tab]} · NOFINANCE`;
+  try { await loadPeople(); resetCharts(); view.innerHTML = await renderers[st.tab](); paintCharts(view); }
   catch (e) { view.innerHTML = `<div class="alert danger">${esc(e instanceof ApiError ? e.message : "Sem conexão com a API. Confira se o npm run dev está rodando.")}</div>`; }
 }
 /** "Mais": telas menos usadas ficam recolhidas; abrem sozinhas se a tela atual estiver lá. */
@@ -93,11 +113,11 @@ const setMore = (open: boolean) => { moreBox.hidden = !open; moreBtn.setAttribut
 moreBtn.addEventListener("click", () => setMore(moreBox.hidden));
 $("#tabs").addEventListener("click", e => {
   const t = (e.target as HTMLElement).dataset.tab as Tab | undefined;
-  if (t) { tab = t; menu(false); history.pushState(null, "", `#${t}`); scrollTo(0, 0); render(); }
+  if (t) { st.tab = t; menu(false); history.pushState(null, "", `#${t}`); scrollTo(0, 0); render(); }
 });
 const entSel = $<HTMLSelectElement>("#entity");
 entSel.value = getEntity();
-entSel.addEventListener("change", () => { setEntity(entSel.value); personFilter = ""; render(); });
+entSel.addEventListener("change", () => { setEntity(entSel.value); st.personFilter = ""; render(); });
 
 /* ===================== Painel ===================== */
 interface Dashboard {
@@ -111,9 +131,9 @@ async function painel() {
   const [d, rk, cb, accs] = await Promise.all([api<Dashboard>("/dashboard"), personal ? api<Ranking>("/ranking") : Promise.resolve(null),
     personal ? api<Board>("/conduct/board").catch(() => null) : Promise.resolve(null), api<Acc[]>("/accounts").catch(() => [] as Acc[])]);
   const ds = personal ? await api<DebtSummary>("/debts/summary").catch(() => null) : null;
-  pendingCache = personal && isGuardian() ? await api<Pending[]>("/conduct/pending").catch(() => []) : [];
-  budgetCache = await api<Budget>("/budget").catch(() => null);
-  const waitingReq = personal && isGuardian() ? (await api<PReq[]>("/requests").catch(() => [] as PReq[])).filter(r => r.status === "PENDING" && r.requestedBy !== me?.id) : [];
+  st.pendingCache = personal && isGuardian() ? await api<Pending[]>("/conduct/pending").catch(() => []) : [];
+  st.budgetCache = await api<Budget>("/budget").catch(() => null);
+  const waitingReq = personal && isGuardian() ? (await api<PReq[]>("/requests").catch(() => [] as PReq[])).filter(r => r.status === "PENDING" && r.requestedBy !== st.me?.id) : [];
   const live = accs.filter(a => a.active);
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
   const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
@@ -131,9 +151,9 @@ async function painel() {
   ${waitingReq.length ? `<div class="alert"><b>${waitingReq.length} pedido(s) de compra aguardando você:</b> ${waitingReq.slice(0, 3).map(r => `${esc(r.requestedByName)} · ${esc(r.description)} ${money(r.amountCents)}`).join(" · ")}
     <button class="sm" data-goto="pedidos">Decidir</button></div>` : ""}
   ${!personal && isRoot() ? await pjCards() : ""}
-  ${pendingCard(pendingCache)}
+  ${pendingCard(st.pendingCache)}
   ${ds ? debtBoard(ds) : ""}
-  ${budgetCard(budgetCache)}
+  ${budgetCard(st.budgetCache)}
   ${personal ? await receiptCard() : ""}
   ${cb ? todayCard(cb) : ""}
   ${rk ? spendKpis(rk) : ""}
@@ -158,7 +178,7 @@ async function painel() {
       <div><label>De quê</label><input name="d" placeholder="ex.: escova, venda de cosmético" required></div>
       <div><label>Tipo</label><select name="c"><option value="SERVICOS">Serviço</option><option value="VENDAS">Venda</option><option value="RENDA">Renda</option><option value="OUTROS">Outros</option></select></div>
       <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
-      ${personSelect(me?.personId)}
+      ${personSelect(st.me?.personId)}
       ${cameIn}
       <div><button>Registrar</button></div>
     </form>
@@ -187,21 +207,17 @@ async function painel() {
     <tr><th>Credor</th><th>Juros</th><th>Saldo</th></tr>
     ${d.debtPriority.map((x, i) => `<tr><td>${i + 1}. ${esc(x.counterparty)}</td><td>${x.rateBp ? pct(x.rateBp) : "—"}</td><td>${money(x.openCents)}</td></tr>`).join("")}
   </table></div><p class="muted">Juros embutidos: ${money(d.debtInterestCents)}</p></div>` : ""}`;
-}
-
-/* ===================== Contas a pagar / receber ===================== */
-let statusFilter: "open" | "settled" | "all" = "open";
-let personFilter = ""; // "" = todas, "none" = casa/geral, ou id
+} // "" = todas, "none" = casa/geral, ou id
 async function titles(kind: Kind) {
-  const list = await api<Title[]>(`/titles?kind=${kind}&status=${statusFilter}${personFilter ? `&person=${personFilter}` : ""}`);
+  const list = await api<Title[]>(`/titles?kind=${kind}&status=${st.statusFilter}${st.personFilter ? `&person=${st.personFilter}` : ""}`);
   const label = kind === "PAYABLE" ? "Contas a pagar" : "Contas a receber";
   const total = list.reduce((s, t) => s + Math.max(0, t.openCents), 0);
-  const f = (v: typeof statusFilter, l: string) => `<button class="${statusFilter === v ? "" : "ghost"} sm" data-filter="${v}">${l}</button>`;
+  const f = (v: typeof st.statusFilter, l: string) => `<button class="${st.statusFilter === v ? "" : "ghost"} sm" data-filter="${v}">${l}</button>`;
   return `
   <div class="row spread"><h2>${label}</h2><button data-new="${kind}">+ Nova</button></div>
   <div class="row" style="margin-bottom:12px">${f("open", "Em aberto")}${f("settled", kind === "PAYABLE" ? "Pagas" : "Recebidas")}${f("all", "Todas")}
-    <select id="pfilter" style="width:auto"><option value="">Todas as pessoas</option><option value="none" ${personFilter === "none" ? "selected" : ""}>Casa / geral</option>
-      ${people.map(p => `<option value="${p.id}" ${personFilter === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+    <select id="pfilter" style="width:auto"><option value="">Todas as pessoas</option><option value="none" ${st.personFilter === "none" ? "selected" : ""}>Casa / geral</option>
+      ${st.people.map(p => `<option value="${p.id}" ${st.personFilter === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
     <span class="muted" style="margin-left:auto">Em aberto: <b>${money(total)}</b></span></div>
   <div class="list">${list.length ? list.map(titleItem).join("") : `<div class="empty">Nenhuma conta aqui. Toque em "+ Nova".</div>`}</div>`;
 }
@@ -237,7 +253,7 @@ function titleForm(kind: Kind, t?: Title) {
     <div><label>Vencimento</label><input name="due" type="date" value="${t?.dueDate ?? ""}"></div>
     <div><label>Tipo</label><select name="nat" ${isNew ? "" : "disabled"}>${natures.map(n => `<option value="${n}" ${t?.nature === n ? "selected" : ""}>${NATURE[n]}</option>`).join("")}</select></div>
     <div><label>Categoria</label><select name="cat">${catOptions(t?.category ?? (kind === "PAYABLE" ? "OUTROS" : "RENDA"))}</select></div>
-    ${personSelect(t ? t.personId : personFilter && personFilter !== "none" ? personFilter : null)}
+    ${personSelect(t ? t.personId : st.personFilter && st.personFilter !== "none" ? st.personFilter : null)}
     <div data-int><label>Juros</label><select name="model">
       ${[["NONE", "Sem juros"], ["FIXED_ONCE", "% uma vez"], ["MONTHLY_SIMPLE", "% ao mês simples"], ["MONTHLY_COMPOUND", "% ao mês composto"]]
         .map(([v, l]) => `<option value="${v}" ${t?.interestModel === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
@@ -346,45 +362,38 @@ function editPay(id: string, amt: number, dt: string) {
     toast("Pagamento alterado.");
   });
 }
-
-/* ===================== Extrato ===================== */
-let extFrom = addMonths(today().slice(0, 7), -5), extTo = today().slice(0, 7);
 interface Month { month: string; incomeCents: number; expenseCents: number; interestPaidCents: number; amortizationCents: number; loansInCents: number; resultCents: number; cashBalanceCents: number; }
 async function extrato() {
-  const st = await api<{ months: Month[] }>(`/statement?from=${extFrom}&to=${extTo}`);
-  const tot = (k: keyof Month) => st.months.reduce((s, m) => s + (m[k] as number), 0);
+  const stData = await api<{ months: Month[] }>(`/statement?from=${st.extFrom}&to=${st.extTo}`);
+  const tot = (k: keyof Month) => stData.months.reduce((s, m) => s + (m[k] as number), 0);
   const cell = (v: number, sign = false) => `<td class="${sign ? (v < 0 ? "neg" : "pos") : ""}">${money(v)}</td>`;
   const y = Number(today().slice(0, 4));
-  const isYear = (yy: number) => extFrom === `${yy}-01` && extTo === `${yy}-12`;
-  const n = st.months.length || 1;
+  const isYear = (yy: number) => st.extFrom === `${yy}-01` && st.extTo === `${yy}-12`;
+  const n = stData.months.length || 1;
   return `<h2>Extrato realizado</h2>
   <div class="row" style="margin-bottom:12px">${[y, y - 1, y - 2].map(yy => `<button class="${isYear(yy) ? "" : "ghost"} sm" data-extyear="${yy}">Ano ${yy}</button>`).join("")}
     <button class="ghost sm" data-extyear="last6">Últimos 6 meses</button></div>
   <form class="card form" id="ext">
-    <div><label>De</label><input type="month" name="from" value="${extFrom}"></div>
-    <div><label>Até</label><input type="month" name="to" value="${extTo}"></div>
+    <div><label>De</label><input type="month" name="from" value="${st.extFrom}"></div>
+    <div><label>Até</label><input type="month" name="to" value="${st.extTo}"></div>
     <div><button>Ver</button></div>
   </form>
   <div class="card scroll"><table>
     <tr><th>Mês</th><th>Receitas</th><th>Despesas</th><th>Juros pagos</th><th>Amortização</th><th>Empréstimos</th><th>Resultado</th><th>Caixa</th></tr>
-    ${st.months.map(m => `<tr><td>${monthLabel(m.month)}</td>${cell(m.incomeCents)}${cell(m.expenseCents)}${cell(m.interestPaidCents)}${cell(m.amortizationCents)}${cell(m.loansInCents)}${cell(m.resultCents, true)}${cell(m.cashBalanceCents, true)}</tr>`).join("")}
-    ${st.months.length > 1 ? `<tr><td class="muted">Média/mês</td><td class="muted">${money(Math.round(tot("incomeCents") / n))}</td><td class="muted">${money(Math.round(tot("expenseCents") / n))}</td><td class="muted">${money(Math.round(tot("interestPaidCents") / n))}</td><td></td><td></td><td class="muted">${money(Math.round(tot("resultCents") / n))}</td><td></td></tr>` : ""}
+    ${stData.months.map(m => `<tr><td>${monthLabel(m.month)}</td>${cell(m.incomeCents)}${cell(m.expenseCents)}${cell(m.interestPaidCents)}${cell(m.amortizationCents)}${cell(m.loansInCents)}${cell(m.resultCents, true)}${cell(m.cashBalanceCents, true)}</tr>`).join("")}
+    ${stData.months.length > 1 ? `<tr><td class="muted">Média/mês</td><td class="muted">${money(Math.round(tot("incomeCents") / n))}</td><td class="muted">${money(Math.round(tot("expenseCents") / n))}</td><td class="muted">${money(Math.round(tot("interestPaidCents") / n))}</td><td></td><td></td><td class="muted">${money(Math.round(tot("resultCents") / n))}</td><td></td></tr>` : ""}
     <tr><th>Total</th><th>${money(tot("incomeCents"))}</th><th>${money(tot("expenseCents"))}</th><th>${money(tot("interestPaidCents"))}</th><th>${money(tot("amortizationCents"))}</th><th>${money(tot("loansInCents"))}</th><th>${money(tot("resultCents"))}</th><th></th></tr>
   </table></div>
   <p class="muted">Despesa = contas pagas + juros. Devolver o valor emprestado é amortização (sai do caixa, não é despesa). Empréstimo recebido entra no caixa, mas não é receita.</p>`;
 }
-
-/* ===================== Futuro: projeção + simulador ===================== */
-let projMonths = 12;
-let simCache = "";
 async function futuro() {
   const [p, recs] = await Promise.all([
-    api<{ startingCashCents: number; months: { month: string; inCents: number; outCents: number; netCents: number; accumulatedCents: number; estimatedItems: number }[] }>(`/projection?months=${projMonths}`),
+    api<{ startingCashCents: number; months: { month: string; inCents: number; outCents: number; netCents: number; accumulatedCents: number; estimatedItems: number }[] }>(`/projection?months=${st.projMonths}`),
     api<Recurrence[]>("/recurrences").catch(() => [] as Recurrence[])]);
   // Sugestão a partir das contas automáticas ativas (nada de valor fixo no código).
   const sum = (k: Kind) => recs.filter(r => r.active && r.kind === k && r.defaultAmountCents).reduce((a, r) => a + (r.defaultAmountCents ?? 0), 0);
   const simInc = sum("RECEIVABLE") ? moneyInput(sum("RECEIVABLE")) : "", simFix = sum("PAYABLE") ? moneyInput(sum("PAYABLE")) : "";
-  const opt = (n: number) => `<button class="${projMonths === n ? "" : "ghost"} sm" data-proj="${n}">${n >= 12 ? `${n / 12} ano${n > 12 ? "s" : ""}` : `${n} meses`}</button>`;
+  const opt = (n: number) => `<button class="${st.projMonths === n ? "" : "ghost"} sm" data-proj="${n}">${n >= 12 ? `${n / 12} ano${n > 12 ? "s" : ""}` : `${n} meses`}</button>`;
   return `<h2>Futuro</h2>
   <div class="row" style="margin-bottom:12px">${[6, 12, 24, 36, 60].map(opt).join("")}</div>
   <div class="card scroll"><table>
@@ -402,7 +411,7 @@ async function futuro() {
       <div><label class="inline"><input type="checkbox" name="roll" checked> Juros por ciclo se atrasar</label>
            <label class="inline"><input type="checkbox" name="cards" checked> Incluir cartões</label></div>
       <div><button>Simular</button></div>
-    </form><div id="sim-out">${simCache}</div></div>`;
+    </form><div id="sim-out">${st.simCache}</div></div>`;
 }
 interface SimRes { assumptions: string[]; monthlySurplusCents: number; totalDebtCents: number; results: { strategy: string; feasible: boolean; months: number | null; extraInterestCents: number; payoffOrder: string[] }[]; }
 async function runSim(form: HTMLFormElement) {
@@ -411,13 +420,13 @@ async function runSim(form: HTMLFormElement) {
     monthlyIncomeCents: centsOf(f, "inc"), monthlyFixedCents: centsOf(f, "fix"), extraCents: centsOf(f, "ext", false) ?? 0,
     initialCashCents: centsOf(f, "cash", false) ?? 0, rolloverMonthly: f.has("roll"), includeCards: f.has("cards") } });
   const name: Record<string, string> = { AVALANCHE: "Avalanche (juros primeiro)", SNOWBALL: "Bola de neve (menor saldo)" };
-  simCache = `<p class="muted">Dívidas: ${money(r.totalDebtCents)} · sobra mensal: <b class="${r.monthlySurplusCents <= 0 ? "neg" : ""}">${money(r.monthlySurplusCents)}</b></p>
+  st.simCache = `<p class="muted">Dívidas: ${money(r.totalDebtCents)} · sobra mensal: <b class="${r.monthlySurplusCents <= 0 ? "neg" : ""}">${money(r.monthlySurplusCents)}</b></p>
     <div class="scroll"><table><tr><th>Estratégia</th><th>Prazo</th><th>Quitação</th><th>Juros extras</th></tr>
     ${r.results.map(x => `<tr><td>${name[x.strategy]}</td>${x.feasible
       ? `<td>${x.months} mês(es)</td><td>${monthLabel(addMonths(today().slice(0, 7), x.months ?? 0))}</td><td>${money(x.extraInterestCents)}</td>`
       : `<td colspan="3" class="neg">Não quita em 10 anos</td>`}</tr>`).join("")}</table></div>
     <p class="muted">Premissas: ${r.assumptions.map(esc).join("; ")}.</p>`;
-  $("#sim-out").innerHTML = simCache;
+  $("#sim-out").innerHTML = st.simCache;
 }
 
 /* ===================== Ajustes: automáticas + avisos ===================== */
@@ -428,7 +437,7 @@ async function config() {
   ]);
   const bForm = isGuardian() ? budgetForm(await api<Budget>("/budget")) : "";
   return `${await pushCard()}${bForm}<div class="card"><h3>Verificação em duas etapas</h3>
-    ${me?.totpEnabled
+    ${st.me?.totpEnabled
       ? `<p><span class="chip SETTLED">Ativa</span> Ao entrar num aparelho novo, além da senha o sistema pede o código do app autenticador.</p>
          <div class="row"><button class="ghost sm" data-mfaoff>Desativar</button></div>`
       : `<p class="muted">Protege sua conta mesmo se alguém descobrir sua senha. Grátis: usa o Google Authenticator ou o Microsoft Authenticator no celular (sem SMS).</p>
@@ -485,18 +494,15 @@ async function editRec(id: string) {
     toast("Alterada. Vale para os próximos meses.");
   });
 }
-
-/* ===================== Pessoas da casa ===================== */
-let peopleMonth = today().slice(0, 7);
 interface PeopleSummary { totalPaidCents: number; people: { personId: string | null; name: string; active: boolean; paidCents: number; openCents: number; openCount: number; byCategory: { category: string; cents: number }[] }[]; }
 async function pessoas() {
-  const s = await api<PeopleSummary>(`/people/summary?from=${peopleMonth}&to=${peopleMonth}`);
+  const s = await api<PeopleSummary>(`/people/summary?from=${st.peopleMonth}&to=${st.peopleMonth}`);
   const share = (v: number) => (s.totalPaidCents ? Math.round((v / s.totalPaidCents) * 100) : 0);
   return `<div class="row spread"><h2>Pessoas da casa</h2>${isAdmin() ? "<button data-newperson>+ Nova pessoa</button>" : ""}</div>
   <p class="muted">Vincule contas a uma pessoa (no cadastro da conta, no "Já gastei" ou na conta automática) para ver quanto cada uma custa.</p>
-  <form class="card form" id="pmonth"><div><label>Mês</label><input type="month" name="m" value="${peopleMonth}"></div><div><button>Ver</button></div></form>
+  <form class="card form" id="pmonth"><div><label>Mês</label><input type="month" name="m" value="${st.peopleMonth}"></div><div><button>Ver</button></div></form>
   <div class="list">${s.people.filter(p => p.active || p.paidCents || p.openCents).map(p => {
-    const rel = people.find(x => x.id === p.personId)?.relation;
+    const rel = st.people.find(x => x.id === p.personId)?.relation;
     return `<div class="item">
     <div class="head"><span class="who">${esc(p.name)}${rel ? ` <span class="muted">· ${esc(rel)}</span>` : ""}${p.active ? "" : ` <span class="chip OVERDUE">inativa</span>`}</span>
       <span class="amt">${money(p.paidCents)}</span></div>
@@ -520,7 +526,7 @@ function newPerson() {
   });
 }
 function editPerson(id: string) {
-  const p = people.find(x => x.id === id); if (!p) return;
+  const p = st.people.find(x => x.id === id); if (!p) return;
   openDialog("Editar pessoa", personForm(p), "Salvar", async f => {
     await api(`/people/${id}`, { method: "PATCH", body: { name: str(f, "name"), relation: str(f, "rel") || null } });
     toast("Alterado.");
@@ -539,7 +545,6 @@ function pendingCard(list: Pending[]) {
         <button class="ghost sm" data-review="${p.ruleId}" data-person="${p.personId}" data-day="${p.day}" data-val="false">Recusar</button></div></li>`).join("")}</ul>
     ${list.length > 1 ? `<div class="row"><button class="ghost sm" data-reviewall>Aprovar todos</button></div>` : ""}</div>`;
 }
-let pendingCache: Pending[] = [];
 interface Score { due: number; done: number; penaltyPoints: number; percent: number; }
 interface BoardRow { personId: string; name: string; nickname: string | null; hasLogin: boolean; grid: { day: string; items: Item[] }[]; fullDays: number; daysCounted: number;
   habitsDone: number; habitsDue: number; infractions: number; pointsLost: number; finesWeekCents: number; balanceCents: number; month: Score; }
@@ -565,36 +570,33 @@ const stars = (n: number) => n ? `${"★".repeat(Math.min(n, 30))}${n > 30 ? ` +
 /** Painel: tarefas de hoje de todo mundo + cobrança para quem está logado. */
 function todayCard(b: Board) {
   if (!b.rows.some(r => dayOf(r, b.today)?.items.length)) return "";
-  const meRow = b.rows.find(r => r.personId === me?.personId);
+  const meRow = b.rows.find(r => r.personId === st.me?.personId);
   const missing = meRow ? (dayOf(meRow, b.today)?.items ?? []).filter(i => !i.done && !i.pending) : [];
   return `${missing.length ? `<div class="alert danger"><b>Seus combinados de hoje:</b> falta ${missing.map(h => esc(h.name)).join(", ")}.
       <button class="sm" data-goto="combinados">Marcar agora</button></div>` : ""}
     <div class="card"><div class="row spread"><h3 style="margin:0">Combinados de hoje</h3><button class="ghost sm" data-goto="combinados">Ver tudo</button></div>
     ${b.rotations.length ? `<p class="muted" style="margin:8px 0 0">${b.rotations.map(r => `${esc(r.name)}: <b>${esc(r.today ?? "—")}</b>`).join(" · ")}</p>` : ""}
     <div class="today-list">${b.rows.filter(r => dayOf(r, b.today)?.items.length).map(r => `<div><span>${esc(r.name)}${nick(r.nickname)}</span>${dots(dayOf(r, b.today)?.items)}</div>`).join("")}</div></div>`;
-}
-
-let cbDate = today();
-let cbView = ""; // "" = família; senão id da pessoa
+} // "" = família; senão id da pessoa
 async function combinadosPage() {
   if (getEntity() !== "personal") return `<div class="empty">Os Combinados são da família (entidade Pessoal).</div>`;
-  const [b, rules, al] = await Promise.all([api<Board>(`/conduct/board?date=${cbDate}`), api<Rule[]>("/conduct/rules"), api<AllowanceResp>("/conduct/allowance")]);
-  if (!cbView && me?.personId && b.rows.some(r => r.personId === me!.personId) && !isGuardian()) cbView = me.personId;
-  if (me?.conductOnly && cbView !== "" && cbView !== me.personId) cbView = me.personId ?? "";
-  const pushTop = me?.conductOnly && !(await currentSub()) ? await pushCard() : "";
+  const [b, rules, al] = await Promise.all([api<Board>(`/conduct/board?date=${st.cbDate}`), api<Rule[]>("/conduct/rules"), api<AllowanceResp>("/conduct/allowance")]);
+  if (!st.cbView && st.me?.personId && b.rows.some(r => r.personId === st.me!.personId) && !isGuardian()) st.cbView = st.me.personId;
+  if (st.me?.conductOnly && st.cbView !== "" && st.cbView !== st.me.personId) st.cbView = st.me.personId ?? "";
+  const pushTop = st.me?.conductOnly && !(await currentSub()) ? await pushCard() : "";
   const tabs = `<div class="person-tabs" role="tablist">
-    <button role="tab" class="${cbView === "" ? "on" : ""}" data-cbperson="">Família</button>
-    ${b.rows.filter(r => !me?.conductOnly || r.personId === me.personId).map(r => `<button role="tab" class="${cbView === r.personId ? "on" : ""}" data-cbperson="${r.personId}">${esc(r.name)}${r.personId === me?.personId ? " (eu)" : ""}</button>`).join("")}
-    ${isAdmin() ? `<button role="tab" class="${cbView === "admin" ? "on" : ""}" data-cbperson="admin">Regras e mesadas</button>` : ""}</div>`;
-  if (cbView === "admin" && isAdmin()) return tabs + await combinadosAdmin(rules, al);
-  if (isGuardian()) { pendingCache = await api<Pending[]>("/conduct/pending").catch(() => []); if (cbView === "") return tabs + pendingCard(pendingCache) + familyView(b, al); }
-  const row = b.rows.find(r => r.personId === cbView);
+    <button role="tab" class="${st.cbView === "" ? "on" : ""}" data-cbperson="">Família</button>
+    ${b.rows.filter(r => !st.me?.conductOnly || r.personId === st.me.personId).map(r => `<button role="tab" class="${st.cbView === r.personId ? "on" : ""}" data-cbperson="${r.personId}">${esc(r.name)}${r.personId === st.me?.personId ? " (eu)" : ""}</button>`).join("")}
+    ${isAdmin() ? `<button role="tab" class="${st.cbView === "admin" ? "on" : ""}" data-cbperson="admin">Regras e mesadas</button>` : ""}</div>`;
+  if (st.cbView === "admin" && isAdmin()) return tabs + await combinadosAdmin(rules, al);
+  if (isGuardian()) { st.pendingCache = await api<Pending[]>("/conduct/pending").catch(() => []); if (st.cbView === "") return tabs + pendingCard(st.pendingCache) + familyView(b, al); }
+  const row = b.rows.find(r => r.personId === st.cbView);
   return pushTop + tabs + (row ? personView(b, row, al.people.find(a => a.personId === row.personId)) : familyView(b, al));
 }
 
 function weekNav(b: Board) {
   return `<div class="weeknav"><button class="ghost sm" data-cbweek="-7" aria-label="Semana anterior">◀</button><b>${br(b.week.start)} a ${br(b.week.end)}</b>
-    <button class="ghost sm" data-cbweek="7" aria-label="Próxima semana">▶</button>${cbDate !== today() ? `<button class="ghost sm" data-cbweek="0">Esta semana</button>` : ""}
+    <button class="ghost sm" data-cbweek="7" aria-label="Próxima semana">▶</button>${st.cbDate !== today() ? `<button class="ghost sm" data-cbweek="0">Esta semana</button>` : ""}
     ${isGuardian() ? `<button class="sm" data-infraction style="margin-left:auto">Registrar ocorrência</button>` : ""}</div>`;
 }
 function rewardLine(a: Allow | undefined) {
@@ -628,7 +630,7 @@ function familyView(b: Board, al: AllowanceResp) {
 }
 
 function personView(b: Board, r: BoardRow, a: Allow | undefined) {
-  const self = r.personId === me?.personId, canMark = self || isGuardian();
+  const self = r.personId === st.me?.personId, canMark = self || isGuardian();
   const yesterday = (() => { const x = new Date(`${b.today}T12:00:00`); x.setDate(x.getDate() - 1); return x.toLocaleDateString("sv-SE"); })();
   const toggles = (day: string, label: string) => {
     const items = dayOf(r, day)?.items ?? [];
@@ -661,7 +663,7 @@ function personView(b: Board, r: BoardRow, a: Allow | undefined) {
 }
 
 async function combinadosAdmin(rules: Rule[], al: AllowanceResp) {
-  const names = new Map(people.map(p => [p.id, p.name]));
+  const names = new Map(st.people.map(p => [p.id, p.name]));
   const who = (r: Rule) => r.assignees.map(a => esc(names.get(a.personId) ?? "?")).join(r.schedule === "ROTATION" ? " → " : ", ") || `<span class="neg">ninguém</span>`;
   const month = al.month;
   return `<div class="card"><div class="row spread"><h3 style="margin:0">Modelo da família</h3><button class="ghost sm" data-template>Aplicar modelo</button></div>
@@ -686,7 +688,7 @@ function ruleForm(r?: Rule) {
     ${r ? "" : `<div class="full"><label>Tipo</label><select name="kind"><option value="HABIT">Tarefa / hábito (a pessoa marca)</option><option value="INFRACTION">Ocorrência (responsável registra)</option></select></div>`}
     ${!r || r.kind === "HABIT" ? `<div class="full" data-habit><label>Frequência</label><select name="schedule">
       ${(["DAILY", "ROTATION", "SPORADIC"] as const).map(s => `<option value="${s}" ${r?.schedule === s ? "selected" : ""}>${s === "DAILY" ? "Todo dia (cada pessoa marcada)" : s === "ROTATION" ? "Revezamento diário (um por dia, na ordem)" : "Avulsa (responsável ativa no dia)"}</option>`).join("")}</select></div>
-    <div class="full" data-habit><label>Quem faz (e a ordem do revezamento)</label><div class="assignees">${people.filter(p => p.active).map(p => `<label class="inline">
+    <div class="full" data-habit><label>Quem faz (e a ordem do revezamento)</label><div class="assignees">${st.people.filter(p => p.active).map(p => `<label class="inline">
       <input type="checkbox" name="who" value="${p.id}" ${pos.has(p.id) ? "checked" : ""}> ${esc(p.name)}
       <input type="number" name="pos_${p.id}" min="1" max="20" value="${pos.get(p.id) ?? ""}" placeholder="ordem" style="width:72px;height:32px"></label>`).join("")}</div></div>` : ""}
     <div><label>Pontos perdidos</label><input name="pts" type="number" min="0" max="1000" value="${r?.points ?? 1}"></div>
@@ -783,9 +785,6 @@ const BANKS = ["Nubank", "Inter", "Itaú", "Bradesco", "Banco do Brasil", "Caixa
   "Banco Pan", "Sicoob", "Sicredi", "BTG", "XP", "Renner (Realize)", "Riachuelo", "C&A", "Magalu", "Casas Bahia", "Americanas", "Carrefour", "Atacadão", "Assaí"];
 const isCashAcc = (t: AccType) => t === "CHECKING" || t === "SAVINGS" || t === "INVESTMENT" || t === "CASH";
 const rateTxt = (bp: number | null) => (bp == null ? "juros não informado" : `${(bp / 100).toLocaleString("pt-BR")}% ao mês`);
-
-let bkOwner = ""; // "" = todos; "none" = dos dois; id da pessoa
-let bkStrategy: "juros" | "rapidas" | "nome" = "juros";
 const STRATEGY = { juros: ["Menos juros", "Atrasados e depois os juros mais altos. Economiza mais dinheiro."],
   rapidas: ["Vitórias rápidas", "Menores primeiro. Fecha dívidas rápido e dá fôlego."],
   nome: ["Limpar o nome", "Negativadas e as atrasadas há mais tempo primeiro."] } as const;
@@ -796,10 +795,9 @@ interface Report { month: string;
   trend: { month: string; incomeCents: number; expenseCents: number; resultCents: number; amortizationCents: number }[];
   byCategory: { category: string; cents: number; count: number }[]; byPerson: { name: string; cents: number; count: number }[];
   topExpenses: { what: string; category: string; cents: number; day: string; who: string | null }[]; }
-let repMonth = today().slice(0, 7);
 const pctTxt = (v: number | null) => (v == null ? "—" : `${v.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`);
 async function indicadoresPage() {
-  const r = await api<Report>(`/report?month=${repMonth}`), k = r.kpis;
+  const r = await api<Report>(`/report?month=${st.repMonth}`), k = r.kpis;
   const tile = (label: string, value: string, sub = "", cls = "") => `<div class="card kpi"><div class="l">${label}</div><div class="v ${cls}">${value}</div>${sub ? `<div class="muted">${sub}</div>` : ""}</div>`;
   // Leitura em uma frase: o que o mês diz, sem precisar interpretar gráfico.
   const verdict = k.incomeCents === 0 && k.expenseCents === 0 ? "Sem lançamentos neste mês ainda."
@@ -844,27 +842,26 @@ interface PReq { id: string; description: string; amountCents: number; category:
 interface PSource { id: string; type: string; label: string; ownerName: string | null; }
 const REQ_ST: Record<PReq["status"], string> = { PENDING: `<span class="chip NO_VALUE">aguardando</span>`, APPROVED: `<span class="chip SETTLED">aprovado</span>`,
   REJECTED: `<span class="chip OVERDUE">não aprovado</span>`, CANCELED: `<span class="chip">cancelado</span>` };
-let reqPrefill: { d?: string; v?: number; c?: string } = {};
 const srcLabel = (s: PSource) => `${s.type === "CARD" ? "Cartão " : ""}${esc(s.label)}${s.ownerName ? ` (${esc(s.ownerName)})` : ""}`;
 async function pedidosPage() {
   if (getEntity() !== "personal") return `<div class="empty">Pedidos de compra são da família (entidade Pessoal).</div>`;
   const [list, src] = await Promise.all([api<PReq[]>("/requests"), api<PSource[]>("/requests/sources")]);
-  const judge = isGuardian() && !me?.conductOnly;
-  const toDecide = judge ? list.filter(r => r.status === "PENDING" && r.requestedBy !== me?.id) : [];
-  const mine = list.filter(r => r.requestedBy === me?.id || !judge);
-  const others = judge ? list.filter(r => r.requestedBy !== me?.id && r.status !== "PENDING").slice(0, 20) : [];
+  const judge = isGuardian() && !st.me?.conductOnly;
+  const toDecide = judge ? list.filter(r => r.status === "PENDING" && r.requestedBy !== st.me?.id) : [];
+  const mine = list.filter(r => r.requestedBy === st.me?.id || !judge);
+  const others = judge ? list.filter(r => r.requestedBy !== st.me?.id && r.status !== "PENDING").slice(0, 20) : [];
   const opts = (sel: string | null) => `<option value="">Escolha de onde sai</option>${src.map(s => `<option value="${s.id}" ${s.id === sel ? "selected" : ""}>${srcLabel(s)}</option>`).join("")}`;
   const row = (r: PReq) => `<li><div class="row spread"><span><b>${esc(r.description)}</b> · ${money(r.amountCents)}</span>${REQ_ST[r.status]}</div>
     <div class="muted">${esc(r.requestedByName)}${r.forPersonName && r.forPersonName !== r.requestedByName ? ` para ${esc(r.forPersonName)}` : ""} · ${br(r.createdAt.slice(0, 10))}
       ${r.accountLabel ? ` · pediu pelo ${esc(r.accountLabel)}` : ""}${r.paidAccountLabel && r.status === "APPROVED" ? ` · saiu do ${esc(r.paidAccountLabel)}` : ""}</div>
     ${r.reviewNote ? `<div>${r.status === "REJECTED" ? "Motivo" : "Recado"}: <b>${esc(r.reviewNote)}</b>${r.reviewedByName ? ` <span class="muted">— ${esc(r.reviewedByName)}</span>` : ""}</div>` : ""}
-    ${r.requestedBy === me?.id && r.status === "PENDING" ? `<div class="row"><button class="ghost sm" data-reqcancel="${r.id}">Cancelar pedido</button></div>` : ""}
-    ${r.requestedBy === me?.id && r.status === "REJECTED" ? `<div class="row"><button class="ghost sm" data-reqagain="${r.id}">Pedir de novo</button></div>` : ""}</li>`;
+    ${r.requestedBy === st.me?.id && r.status === "PENDING" ? `<div class="row"><button class="ghost sm" data-reqcancel="${r.id}">Cancelar pedido</button></div>` : ""}
+    ${r.requestedBy === st.me?.id && r.status === "REJECTED" ? `<div class="row"><button class="ghost sm" data-reqagain="${r.id}">Pedir de novo</button></div>` : ""}</li>`;
   const decide = (r: PReq) => `<li><div><b>${esc(r.requestedByName)}</b>${r.forPersonName && r.forPersonName !== r.requestedByName ? ` (para ${esc(r.forPersonName)})` : ""} pede:
       <b>${esc(r.description)}</b> · <b>${money(r.amountCents)}</b> <span class="muted">· ${esc(catLabel(r.category))} · ${br(r.createdAt.slice(0, 10))}</span></div>
     <div class="st-grid"><select id="racc-${r.id}" aria-label="De onde sai">${opts(r.accountId)}</select><input id="rnote-${r.id}" placeholder="Recado (obrigatório se recusar)" maxlength="200"></div>
     <div class="row"><button class="sm" data-reqok="${r.id}">Aprovar e lançar</button><button class="ghost sm" data-reqno="${r.id}">Recusar</button></div></li>`;
-  const p = reqPrefill; reqPrefill = {};
+  const p = st.reqPrefill; st.reqPrefill = {};
   return `<h2>Pedidos de compra</h2>
   ${toDecide.length ? `<div class="card pending-card"><h3>Aguardando sua decisão (${toDecide.length})</h3><ul class="imp">${toDecide.map(decide).join("")}</ul>
     <p class="muted">Aprovar lança o gasto na conta escolhida, em nome de quem vai usar. Sem saldo onde pediram? Troque a conta ou recuse com um recado.</p></div>` : ""}
@@ -874,10 +871,10 @@ async function pedidosPage() {
       <div><label>Quanto (R$)</label><input name="v" inputmode="decimal" required placeholder="0,00" value="${p.v ? moneyInput(p.v) : ""}"></div>
       <div><label>Categoria</label><select name="c">${catOptions(p.c ?? "OUTROS")}</select></div>
       <div class="full"><label>De onde você sugere sair</label><select name="a">${opts(null)}</select></div>
-      ${me?.conductOnly ? "" : `<div><label>Para quem</label><select name="person">${personOptions(me?.personId ?? null)}</select></div>`}
+      ${st.me?.conductOnly ? "" : `<div><label>Para quem</label><select name="person">${personOptions(st.me?.personId ?? null)}</select></div>`}
       <div class="full"><button>Pedir autorização</button></div>
     </form></div>
-  ${me?.conductOnly ? await receiptCard() : ""}
+  ${st.me?.conductOnly ? await receiptCard() : ""}
   <div class="card"><h3>${judge ? "Meus pedidos" : "Seus pedidos"}</h3>${mine.length ? `<ul class="imp">${mine.map(row).join("")}</ul>` : `<p class="muted">Nenhum pedido ainda.</p>`}</div>
   ${others.length ? `<div class="card"><h3>Decididos recentemente</h3><ul class="imp">${others.map(row).join("")}</ul></div>` : ""}`;
 }
@@ -886,7 +883,6 @@ async function pedidosPage() {
 /* ===================== Orçamento ===================== */
 interface Budget { month: string; monthElapsedPct: number; items: { category: string; limitCents: number; spentCents: number; leftCents: number; pct: number }[]; }
 const SPEND_CATS = CATEGORIES.filter(c => !["RENDA", "VENDAS", "SERVICOS", "DIVIDA", "CARTAO", "IMPOSTOS", "PRO_LABORE", "LUCROS"].includes(c));
-let budgetCache: Budget | null = null;
 function budgetCard(b: Budget | null) {
   if (!b || !b.items.length) return "";
   return `<div class="card"><div class="row spread"><h3 style="margin:0">Orçamento do mês</h3><span class="muted">${b.monthElapsedPct}% do mês passou</span></div>
@@ -925,12 +921,12 @@ function debtBoard(d: DebtSummary) {
 }
 
 async function bancosPage() {
-  const q = `?strategy=${bkStrategy}${bkOwner ? `&person=${bkOwner}` : ""}`;
+  const q = `?strategy=${st.bkStrategy}${st.bkOwner ? `&person=${st.bkOwner}` : ""}`;
   const [accs, ov, po, ds, trs] = await Promise.all([api<Acc[]>("/accounts"), api<{ people: OwnerRow[] }>("/overview"), api<Payoff>(`/payoff-order${q}`), api<DebtSummary>("/debts/summary"),
     api<Transfer[]>("/transfers?limit=20").catch(() => [] as Transfer[])]);
-  trCache = trs;
-  const owners = [{ id: "", name: "Todos" }, ...people.filter(p => p.active).map(p => ({ id: p.id, name: p.name })), { id: "none", name: "Dos dois / casa" }];
-  const shown = accs.filter(a => a.active && (bkOwner === "" || (bkOwner === "none" ? !a.ownerPersonId : a.ownerPersonId === bkOwner)));
+  st.trCache = trs;
+  const owners = [{ id: "", name: "Todos" }, ...st.people.filter(p => p.active).map(p => ({ id: p.id, name: p.name })), { id: "none", name: "Dos dois / casa" }];
+  const shown = accs.filter(a => a.active && (st.bkOwner === "" || (st.bkOwner === "none" ? !a.ownerPersonId : a.ownerPersonId === st.bkOwner)));
   const card = (o: OwnerRow) => `<div class="card">
     <div class="row spread"><h3 style="margin:0">${esc(o.name)}</h3>${o.overdueCount ? `<span class="chip OVERDUE">${o.overdueCount} atrasada(s) · até ${o.maxDaysOverdue} dias</span>` : `<span class="chip SETTLED">nada atrasado</span>`}</div>
     <div class="grid" style="margin:12px 0 0;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
@@ -959,32 +955,32 @@ async function bancosPage() {
   return `<div class="row spread"><h2>Bancos e dívidas</h2><button data-newacc>+ Adicionar</button></div>
   <p class="muted">Cada banco pode ter só saldo, só dívida, conta e cartão… Cadastre produto por produto, com o dono. Informe o saldo de hoje; o sistema calcula o resto.</p>
   ${debtBoard(ds)}
-  <div class="person-tabs">${owners.map(o => `<button class="${bkOwner === o.id ? "on" : ""}" data-bkowner="${o.id}">${esc(o.name)}</button>`).join("")}</div>
-  ${ov.people.filter(o => bkOwner === "" || (bkOwner === "none" ? o.personId === null : o.personId === bkOwner)).map(card).join("")}
+  <div class="person-tabs">${owners.map(o => `<button class="${st.bkOwner === o.id ? "on" : ""}" data-bkowner="${o.id}">${esc(o.name)}</button>`).join("")}</div>
+  ${ov.people.filter(o => st.bkOwner === "" || (st.bkOwner === "none" ? o.personId === null : o.personId === st.bkOwner)).map(card).join("")}
   <h3 style="margin-top:20px">Produtos</h3>
   <div class="list">${shown.map(item).join("") || `<div class="empty">Nada cadastrado ainda. Toque em "+ Adicionar".</div>`}</div>
   ${trs.length ? `<h3 style="margin-top:20px">Últimas transferências</h3>
   <div class="card scroll"><table><tr><th>Data</th><th>De</th><th>Para</th><th>Valor</th><th>Quem lançou</th><th></th></tr>
     ${trs.map(t => `<tr><td>${br(t.day)}</td><td>${esc(t.fromLabel)}</td><td>${esc(t.toLabel)}</td><td>${money(t.amountCents)}</td><td>${esc(t.createdByName ?? "—")}</td>
-      <td>${isAdmin() || t.createdBy === me?.id ? `<button class="ghost sm" data-edittr="${t.id}">Editar</button> <button class="danger sm" data-deltr="${t.id}">Excluir</button>` : ""}</td></tr>`).join("")}</table></div>` : ""}
+      <td>${isAdmin() || t.createdBy === st.me?.id ? `<button class="ghost sm" data-edittr="${t.id}">Editar</button> <button class="danger sm" data-deltr="${t.id}">Excluir</button>` : ""}</td></tr>`).join("")}</table></div>` : ""}
   <div class="card" style="margin-top:20px"><div class="row spread"><h3 style="margin:0">Por onde começar</h3><span class="muted">total ${money(po.totalCents)} · juros ≈ <b class="neg">${money(po.monthlyInterestCents)}/mês</b></span></div>
     <div class="scroll" style="margin-top:10px"><table><tr><th>De quem</th><th>Deve</th><th>Juros por mês</th><th>Atrasadas</th><th>Negativadas</th></tr>
       ${po.owners.map(o => `<tr><td>${esc(o.name)}</td><td>${money(o.openCents)}</td><td class="${o.monthlyInterestCents ? "neg" : ""}">${money(o.monthlyInterestCents)}${o.unknownRates ? ` <span class="muted">+ ${o.unknownRates} sem taxa</span>` : ""}</td>
         <td>${o.overdueCount}</td><td>${o.negativados}</td></tr>`).join("")}</table></div>
-    <div class="person-tabs" style="margin-top:14px">${(Object.keys(STRATEGY) as (keyof typeof STRATEGY)[]).map(k => `<button class="${bkStrategy === k ? "on" : ""}" data-strategy="${k}">${STRATEGY[k][0]}</button>`).join("")}</div>
-    <p class="muted">${STRATEGY[bkStrategy][1]} ${po.unknownRates ? `<b>${po.unknownRates} item(ns) sem juros informado</b>: complete a taxa (fatura, linha CET) ou espere a pesquisa.` : ""}</p>
+    <div class="person-tabs" style="margin-top:14px">${(Object.keys(STRATEGY) as (keyof typeof STRATEGY)[]).map(k => `<button class="${st.bkStrategy === k ? "on" : ""}" data-strategy="${k}">${STRATEGY[k][0]}</button>`).join("")}</div>
+    <p class="muted">${STRATEGY[st.bkStrategy][1]} ${po.unknownRates ? `<b>${po.unknownRates} item(ns) sem juros informado</b>: complete a taxa (fatura, linha CET) ou espere a pesquisa.` : ""}</p>
     ${po.items.length ? `<ol class="payoff">${po.items.map(x => `<li><div class="row spread"><b>${esc(x.name)}</b><span class="${x.daysOverdue ? "neg" : ""}">${money(x.openCents)}</span></div>
       <span class="muted">${esc(x.ownerName)} · ${x.dueDate ? `vence ${br(x.dueDate)}` : "sem data"} · ${x.reasons.map(esc).join(" · ")}${x.monthlyInterestCents ? ` · custa ≈ ${money(x.monthlyInterestCents)}/mês` : ""}</span></li>`).join("")}</ol>` : `<p class="muted">Nenhuma dívida em aberto.</p>`}</div>`;
 }
 
 function accForm(a?: Acc) {
-  const own = (sel: string | null | undefined) => `<option value="">Dos dois / casa</option>${people.filter(p => p.active).map(p => `<option value="${p.id}" ${sel === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}`;
+  const own = (sel: string | null | undefined) => `<option value="">Dos dois / casa</option>${st.people.filter(p => p.active).map(p => `<option value="${p.id}" ${sel === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}`;
   const t = a?.type;
   return `<datalist id="banks">${BANKS.map(b => `<option value="${b}">`).join("")}</datalist>
     ${a ? "" : `<div class="full"><label>O que é</label><select name="type">${(Object.keys(ACC_TYPE) as AccType[]).map(k => `<option value="${k}">${ACC_TYPE[k]}</option>`).join("")}</select></div>`}
     <div><label>Banco / app / loja</label><input name="inst" list="banks" maxlength="80" value="${esc(a?.institution)}" placeholder="ex.: Nubank"></div>
     <div><label>Apelido</label><input name="name" required maxlength="80" value="${esc(a?.name ?? "")}" placeholder="ex.: Conta, Cartão roxo"></div>
-    <div class="full"><label>De quem</label><select name="owner">${own(a?.ownerPersonId ?? me?.personId)}</select></div>
+    <div class="full"><label>De quem</label><select name="owner">${own(a?.ownerPersonId ?? st.me?.personId)}</select></div>
     <div data-f="cash"><label>Saldo de hoje (R$)</label><input name="bal" inputmode="decimal" value="${a ? moneyInput(a.openingBalanceCents) : "0,00"}"></div>
     <div data-f="card"><label>Limite (R$)</label><input name="lim" inputmode="decimal" value="${a?.creditLimitCents != null ? moneyInput(a.creditLimitCents) : ""}"></div>
     <div data-f="card"><label>Dia que fecha</label><input name="close" type="number" min="1" max="31" value="${a?.closingDay ?? ""}"></div>
@@ -1054,9 +1050,8 @@ function billDialog(id: string) {
 }
 interface Transfer { id: string; amountCents: number; day: string; note: string | null; createdBy: string | null; createdByName: string | null;
   fromAccountId: string; toAccountId: string; fromLabel: string; toLabel: string; }
-let trCache: Transfer[] = [];
 async function editTransfer(id: string) {
-  const t = trCache.find(x => x.id === id); if (!t) return;
+  const t = st.trCache.find(x => x.id === id); if (!t) return;
   const accs = (await api<Acc[]>("/accounts")).filter(a => a.active && isCashAcc(a.type));
   const opts = (sel: string) => accs.map(a => `<option value="${a.id}" ${a.id === sel ? "selected" : ""}>${esc(a.ownerName)} · ${esc(a.institution ?? "")} ${esc(a.name)}</option>`).join("");
   openDialog("Corrigir transferência", `<div class="full"><label>De</label><select name="from">${opts(t.fromAccountId)}</select></div>
@@ -1094,11 +1089,9 @@ function spendKpis(rk: Ranking) {
     <div class="v">${money(r.allCents)}</div><div class="who-line"><b>${esc(r.name)}</b>${nick(r.nickname)} · ${money(r.mandatoryCents)} obrigatório, ${money(r.totalCents)} fora</div></div>`;
   return `<div class="grid">${card("Quem mais gastou · semana", most, false)}${card("Quem menos gastou · semana", least, false)}</div>`;
 }
-
-let rkDate = today();
 async function rankingPage() {
   if (getEntity() !== "personal") return `<div class="empty">O ranking é da família (entidade Pessoal).</div>`;
-  const rk = await api<Ranking>(`/ranking?date=${rkDate}`);
+  const rk = await api<Ranking>(`/ranking?date=${st.rkDate}`);
   const board = rk.board.filter(r => r.personId || r.totalCents);
   const max = Math.max(1, ...board.map(r => r.totalCents));
   const delta = (r: RankRow) => {
@@ -1114,7 +1107,7 @@ async function rankingPage() {
   <div class="weeknav"><button class="ghost sm" data-rkweek="-7" aria-label="Semana anterior">◀</button>
     <b>${br(rk.week.start)} a ${br(rk.week.end)}</b>
     <button class="ghost sm" data-rkweek="7" aria-label="Próxima semana">▶</button>
-    ${rkDate !== today() ? `<button class="ghost sm" data-rkweek="0">Esta semana</button>` : ""}</div>
+    ${st.rkDate !== today() ? `<button class="ghost sm" data-rkweek="0">Esta semana</button>` : ""}</div>
   <div class="podium">${board.map((r, i) => `<div class="rk${i === 0 && r.totalCents ? " first" : ""}">
     <span class="pos">${pos(i, r)}</span>
     <span class="name">${esc(r.name)}${nick(r.nickname)}</span>
@@ -1146,17 +1139,16 @@ function editCats(current: string[]) {
 
 /* ===================== Usuários (administrador) ===================== */
 interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; isRoot: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; totpEnabled?: boolean; conductOnly?: boolean; }
-let usersCache: UserRow[] = [];
 async function usersSection() {
-  usersCache = await root<UserRow[]>("/admin/users");
+  st.usersCache = await root<UserRow[]>("/admin/users");
   return `<div class="row spread" style="margin-top:24px"><h2>Usuários</h2><button data-newuser>+ Novo usuário</button></div>
   <p class="muted">Cada pessoa entra com e-mail e senha. Você cria a conta com uma senha provisória; no primeiro acesso ela troca.</p>
-  <div class="list">${usersCache.map(u => `<div class="item">
+  <div class="list">${st.usersCache.map(u => `<div class="item">
     <div class="head"><span class="who">${esc(u.name)}${nick(u.nickname)}</span><span class="chip${u.isRoot ? " NO_VALUE" : ""}">${u.isRoot ? "Root" : u.role === "ADMIN" ? "Administrador" : u.isGuardian ? "Responsável" : "Membro"}</span></div>
     <div class="meta"><span class="muted">${esc(u.email)}</span>${u.active ? "" : `<span class="chip OVERDUE">desativado</span>`}
       ${u.mustChangePassword ? `<span class="chip NO_VALUE">senha provisória</span>` : ""}${u.totpEnabled ? `<span class="chip SETTLED">2 etapas</span>` : ""}${u.conductOnly ? `<span class="chip">só combinados</span>` : ""}
       <span class="muted">último acesso: ${u.lastLoginAt ? br(u.lastLoginAt) : "nunca"}</span></div>
-    ${u.id !== me?.id && !u.isRoot && (isRoot() || u.role !== "ADMIN") ? `<div class="actions"><button class="ghost sm" data-edituser="${u.id}">Editar</button><button class="ghost sm" data-resetuser="${u.id}">Nova senha</button>${u.totpEnabled ? `<button class="ghost sm" data-reset2fa="${u.id}">Zerar 2 etapas</button>` : ""}
+    ${u.id !== st.me?.id && !u.isRoot && (isRoot() || u.role !== "ADMIN") ? `<div class="actions"><button class="ghost sm" data-edituser="${u.id}">Editar</button><button class="ghost sm" data-resetuser="${u.id}">Nova senha</button>${u.totpEnabled ? `<button class="ghost sm" data-reset2fa="${u.id}">Zerar 2 etapas</button>` : ""}
       <button class="ghost sm" data-toggleuser="${u.id}" data-active="${u.active}">${u.active ? "Desativar" : "Reativar"}</button></div>` : ""}
   </div>`).join("")}</div>`;
 }
@@ -1167,7 +1159,7 @@ function userForm(u?: UserRow) {
     <div><label>Perfil</label><select name="role"><option value="MEMBER" ${u?.role === "MEMBER" ? "selected" : ""}>Membro</option>${isRoot() ? `<option value="ADMIN" ${u?.role === "ADMIN" ? "selected" : ""}>Administrador</option>` : ""}</select></div>
     <label class="inline full"><input type="checkbox" name="guard" ${u?.isGuardian ? "checked" : ""}> Responsável (registra ocorrências e corrige hábitos)</label>
     <label class="inline full"><input type="checkbox" name="conly" ${u?.conductOnly ? "checked" : ""}> Só combinados (vê e marca só as tarefas e a mesada dela; nada de finanças)</label>
-    <div class="full"><label>É quem em Pessoas da casa</label><select name="person"><option value="">—</option>${people.map(p => `<option value="${p.id}" ${u?.personId === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
+    <div class="full"><label>É quem em Pessoas da casa</label><select name="person"><option value="">—</option>${st.people.map(p => `<option value="${p.id}" ${u?.personId === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div>
     ${u ? "" : `<div class="full"><label>Senha provisória (mín. 10 caracteres)</label><input name="pw" type="text" minlength="10" required autocomplete="off"></div>`}`;
 }
 function newUser() {
@@ -1178,7 +1170,7 @@ function newUser() {
   });
 }
 function editUser(id: string) {
-  const u = usersCache.find(x => x.id === id); if (!u) return;
+  const u = st.usersCache.find(x => x.id === id); if (!u) return;
   openDialog("Editar usuário", userForm(u), "Salvar", async f => {
     await root(`/admin/users/${id}`, { method: "PATCH", body: { name: str(f, "name"), email: str(f, "email"), nickname: str(f, "nick") || null,
       role: str(f, "role"), personId: str(f, "person") || null, isGuardian: f.has("guard") && !f.has("conly"), conductOnly: f.has("conly") } });
@@ -1186,7 +1178,7 @@ function editUser(id: string) {
   });
 }
 function resetUser(id: string) {
-  const u = usersCache.find(x => x.id === id); if (!u) return;
+  const u = st.usersCache.find(x => x.id === id); if (!u) return;
   openDialog(`Nova senha · ${u.name}`, `<div class="full"><label>Senha provisória (mín. 10 caracteres)</label><input name="pw" type="text" minlength="10" required autocomplete="off"></div>
     <p class="muted full">A pessoa sai de todos os aparelhos e troca a senha no próximo acesso.</p>`, "Definir", async f => {
     await root(`/admin/users/${id}`, { method: "PATCH", body: { password: str(f, "pw") } });
@@ -1199,19 +1191,18 @@ interface Status { ok: boolean; dbLatencyMs: number; database: { version: string
   migrations: { name: string; appliedAt: string }[]; runtime: { node: string; vercel: boolean; region: string | null; commit: string | null }; }
 interface Sess { id: string; name: string; email: string; isRoot: boolean; device: string; lastSeenAt: string; createdAt: string; current: boolean; }
 interface Audit { id: number; at: string; who: string; what: string; action: string; label: string; changed: string[]; }
-let auditQ = { actor: "", area: "", from: "", to: "" };
 const AREAS: [string, string][] = [["", "Tudo"], ["contas", "Contas"], ["pagamentos", "Pagamentos"], ["bancos", "Bancos e dívidas"], ["transferencias", "Transferências"],
   ["combinados", "Combinados"], ["pessoas", "Pessoas e usuários"], ["ajustes", "Ajustes"]];
 const dt = (iso: string) => new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 async function adminPage() {
   if (!isAdmin()) return `<div class="empty">Área só para administradores.</div>`;
-  const aq = new URLSearchParams(Object.entries({ limit: "60", ...auditQ }).filter(([, v]) => v));
-  const [st, sessions, log, ret] = await Promise.all([root<Status>("/admin/status"), root<Sess[]>("/admin/sessions"), root<Audit[]>(`/admin/audit?${aq}`),
+  const aq = new URLSearchParams(Object.entries({ limit: "60", ...st.auditQ }).filter(([, v]) => v));
+  const [stData, sessions, log, ret] = await Promise.all([root<Status>("/admin/status"), root<Sess[]>("/admin/sessions"), root<Audit[]>(`/admin/audit?${aq}`),
     root<{ months: number }>("/admin/audit/retention")]);
-  const c = st.counts;
+  const c = stData.counts;
   const kpi = (l: string, v: string | number) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div></div>`;
-  return `<div class="alert ${st.ok ? "ok" : "danger"}"><b>${st.ok ? "Sistema funcionando" : "Problema no sistema"}</b> · banco PostgreSQL ${esc(st.database.version)} · ${esc(st.database.size)} · resposta ${st.dbLatencyMs} ms
-      ${st.runtime.vercel ? `· Vercel ${esc(st.runtime.region ?? "")}${st.runtime.commit ? ` · versão ${esc(st.runtime.commit)}` : ""}` : "· servidor local"}</div>
+  return `<div class="alert ${stData.ok ? "ok" : "danger"}"><b>${stData.ok ? "Sistema funcionando" : "Problema no sistema"}</b> · banco PostgreSQL ${esc(stData.database.version)} · ${esc(stData.database.size)} · resposta ${stData.dbLatencyMs} ms
+      ${stData.runtime.vercel ? `· Vercel ${esc(stData.runtime.region ?? "")}${stData.runtime.commit ? ` · versão ${esc(stData.runtime.commit)}` : ""}` : "· servidor local"}</div>
     <div class="grid">${kpi("Usuários ativos", c.users ?? 0)}${kpi("Pessoas da casa", c.people ?? 0)}${kpi("Sessões abertas", c.sessions ?? 0)}${kpi("Lançamentos 30 dias", c.settlements30d ?? 0)}</div>
     ${await usersSection()}
     <h2 style="margin-top:24px">Sessões abertas</h2>
@@ -1222,18 +1213,18 @@ async function adminPage() {
     <h2 style="margin-top:24px">Registro de alterações</h2>
     <p class="muted">Toda criação, correção e exclusão, com quem fez e quando. ${ret.months ? `Guardado por ${ret.months} ${ret.months === 1 ? "mês" : "meses"} no banco.` : "Guardado sem limite de tempo."} Cópia mensal permanente no backup.</p>
     <form class="form card" id="audit-f">
-      <div><label>Quem</label><select name="actor"><option value="">Todos</option>${usersCache.map(u => `<option value="${u.id}" ${auditQ.actor === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
-        <option value="system" ${auditQ.actor === "system" ? "selected" : ""}>Sistema (automático)</option></select></div>
-      <div><label>O quê</label><select name="area">${AREAS.map(([v, l]) => `<option value="${v}" ${auditQ.area === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-      <div><label>De</label><input name="from" type="date" value="${auditQ.from}"></div>
-      <div><label>Até</label><input name="to" type="date" value="${auditQ.to}"></div>
+      <div><label>Quem</label><select name="actor"><option value="">Todos</option>${st.usersCache.map(u => `<option value="${u.id}" ${st.auditQ.actor === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
+        <option value="system" ${st.auditQ.actor === "system" ? "selected" : ""}>Sistema (automático)</option></select></div>
+      <div><label>O quê</label><select name="area">${AREAS.map(([v, l]) => `<option value="${v}" ${st.auditQ.area === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div><label>De</label><input name="from" type="date" value="${st.auditQ.from}"></div>
+      <div><label>Até</label><input name="to" type="date" value="${st.auditQ.to}"></div>
       <div><button>Filtrar</button></div>
     </form>
     <div class="card">${log.length ? `<ul class="pays">${log.map(l => `<li><span><b>${esc(l.who)}</b> ${esc(l.action)} <b>${esc(l.what.toLowerCase())}</b>${l.label ? `: ${esc(l.label)}` : ""}${l.changed.length ? ` <span class="muted">(${l.changed.slice(0, 5).map(esc).join(", ")})</span>` : ""}</span><span class="muted">${dt(l.at)}</span></li>`).join("")}</ul>` : `<p class="muted">Nada encontrado com esses filtros.</p>`}</div>
     ${isRoot() ? `<form class="form card" id="ret-f"><div><label>Guardar o registro por (meses, 0 = sem limite)</label><input name="m" type="number" min="0" max="600" value="${ret.months}" required></div>
       <div><button class="ghost">Salvar</button></div><p class="muted full">Recomendado: 0 (sem limite). Se limitar, o que sair do banco fica só nas cópias mensais permanentes do backup.</p></form>` : ""}
     ${isRoot() ? await tokenCard() : ""}
-    <details class="card"><summary>Versão do banco (${st.migrations.length} atualizações aplicadas)</summary><ul class="pays">${st.migrations.map(m => `<li><span>${esc(m.name)}</span><span class="muted">${dt(m.appliedAt)}</span></li>`).join("")}</ul></details>`;
+    <details class="card"><summary>Versão do banco (${stData.migrations.length} atualizações aplicadas)</summary><ul class="pays">${stData.migrations.map(m => `<li><span>${esc(m.name)}</span><span class="muted">${dt(m.appliedAt)}</span></li>`).join("")}</ul></details>`;
 }
 
 /* ===================== Sessão: login, senha, sair ===================== */
@@ -1260,7 +1251,7 @@ async function pushCard() {
   const sub = await currentSub();
   const denied = Notification.permission === "denied";
   return `<div class="card"><h3>Avisos no celular</h3>
-    <p class="muted">${me?.conductOnly ? "Receba aqui quando uma tarefa sua for aprovada." : "Aprovações das crianças, contas que vencem hoje e amanhã e o lembrete do fechamento do mês."} Grátis, direto no aparelho.</p>
+    <p class="muted">${st.me?.conductOnly ? "Receba aqui quando uma tarefa sua for aprovada." : "Aprovações das crianças, contas que vencem hoje e amanhã e o lembrete do fechamento do mês."} Grátis, direto no aparelho.</p>
     ${denied ? `<p class="neg">Os avisos estão bloqueados neste aparelho. Libere nas configurações do navegador/celular para este site e tente de novo.</p>` : ""}
     <div class="row">${sub ? `<span class="chip SETTLED">ligados neste aparelho</span><button class="ghost sm" data-pushtest>Enviar teste</button><button class="ghost sm" data-pushoff>Desligar</button>`
       : `<button class="sm" data-pushon ${denied ? "disabled" : ""}>Ligar avisos neste aparelho</button>`}</div></div>`;
@@ -1333,7 +1324,7 @@ async function receiptCard() {
     ${shown.length ? `<ul class="imp">${shown.map(r => `<li><div class="row spread"><span>${br(r.createdAt.slice(0, 10))} · ${esc(r.personName ?? r.uploadedByName)}${r.accountLabel ? ` · ${esc(r.accountLabel)}` : ""}</span>${RC_ST[r.status]}</div>
       ${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}
       <div class="row"><a class="btnlike sm-like" href="/api/v1/personal/receipts/${r.id}/image" target="_blank" rel="noopener">Ver foto</a>
-        ${r.status === "PENDING" && (r.uploadedBy === me?.id || isGuardian()) ? `<button class="ghost sm" data-rcdel="${r.id}">Descartar</button>` : ""}</div></li>`).join("")}</ul>` : ""}
+        ${r.status === "PENDING" && (r.uploadedBy === st.me?.id || isGuardian()) ? `<button class="ghost sm" data-rcdel="${r.id}">Descartar</button>` : ""}</div></li>`).join("")}</ul>` : ""}
   </div>`;
 }
 async function sendReceipt(file: File) {
@@ -1435,7 +1426,7 @@ async function mfaSetup() {
     <div class="full"><label>Chave (se não der para ler o QR)</label><input readonly value="${esc(s.secret.replace(/(.{4})/g, "$1 ").trim())}" style="font-family:monospace"></div>
     <div class="full"><label>Código de 6 números</label><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></div>`, "Ativar", async f => {
     const r = await root<{ recoveryCodes: string[] }>("/auth/2fa/enable", { method: "POST", body: { code: str(f, "code") } });
-    me = await root<Me>("/auth/me"); dlg.close();
+    st.me = await root<Me>("/auth/me"); dlg.close();
     openDialog("Guarde os códigos de recuperação", `
       <p class="full">Cada código entra <b>uma vez</b> se você perder o celular. Tire um print ou anote e guarde fora do celular. Eles não aparecem de novo.</p>
       <pre class="full" style="font-size:1.05rem;line-height:1.8;margin:0">${r.recoveryCodes.map(esc).join("\n")}</pre>`, "Já guardei", async () => { toast("Verificação em duas etapas ativada."); });
@@ -1447,7 +1438,7 @@ function mfaDisable() {
   openDialog("Desativar verificação em duas etapas", `<p class="muted full">Sua conta volta a pedir só a senha.</p>
     <div class="full"><label>Sua senha</label><input name="pw" type="password" autocomplete="current-password" required></div>`, "Desativar", async f => {
     await root("/auth/2fa/disable", { method: "POST", body: { password: String(f.get("pw") ?? "") } });
-    me = await root<Me>("/auth/me"); toast("Verificação em duas etapas desativada.");
+    st.me = await root<Me>("/auth/me"); toast("Verificação em duas etapas desativada.");
   });
 }
 function changePassword(forced: boolean) {
@@ -1457,25 +1448,25 @@ function changePassword(forced: boolean) {
     <div class="full"><label>Repita a nova senha</label><input name="nxt2" type="password" autocomplete="new-password" required></div>`, "Salvar", async f => {
     if (str(f, "nxt") !== str(f, "nxt2")) throw new ApiError(400, "MISMATCH", "As senhas novas não conferem.");
     await root("/auth/password", { method: "POST", body: { current: str(f, "cur"), next: str(f, "nxt") } });
-    if (me) me.mustChangePassword = false;
+    if (st.me) st.me.mustChangePassword = false;
     toast("Senha alterada. Os outros aparelhos foram desconectados.");
   });
   if (forced) dlgForm.querySelector<HTMLElement>("[data-close]")!.hidden = true;
 }
 function renderMe() {
-  $("#me").innerHTML = me ? `<div><b>${esc(me.name)}</b>${me.nickname ? ` <small>· ${esc(me.nickname)}</small>` : ""}<br><small>${me.isRoot ? "Root" : me.role === "ADMIN" ? "Administrador" : me.isGuardian ? "Responsável" : "Membro"}</small></div>
+  $("#me").innerHTML = st.me ? `<div><b>${esc(st.me.name)}</b>${st.me.nickname ? ` <small>· ${esc(st.me.nickname)}</small>` : ""}<br><small>${st.me.isRoot ? "Root" : st.me.role === "ADMIN" ? "Administrador" : st.me.isGuardian ? "Responsável" : "Membro"}</small></div>
     <div class="row"><button data-act="password">Trocar senha</button><button data-act="logout">Sair</button></div>` : "";
   entSel.hidden = !isAdmin();
   $("#tab-admin").hidden = !isAdmin();
-  const conly = !!me?.conductOnly;
+  const conly = !!st.me?.conductOnly;
   document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => { if (b.id !== "tab-admin") b.hidden = conly && b.dataset.tab !== "combinados" && b.dataset.tab !== "pedidos"; });
   moreBtn.hidden = conly;
-  if (conly && tab !== "pedidos") { tab = "combinados"; if (location.hash !== "#combinados") history.replaceState(null, "", "#combinados"); }
-  if (!isAdmin() && tab === "admin") tab = "painel";
+  if (conly && st.tab !== "pedidos") { st.tab = "combinados"; if (location.hash !== "#combinados") history.replaceState(null, "", "#combinados"); }
+  if (!isAdmin() && st.tab === "admin") st.tab = "painel";
   if (!isAdmin() && getEntity() !== "personal") { setEntity("personal"); entSel.value = "personal"; }
 }
 function showLogin() {
-  me = null; document.documentElement.dataset.auth = "out"; dlg.close(); $("#mfa-form").hidden = true;
+  st.me = null; document.documentElement.dataset.auth = "out"; dlg.close(); $("#mfa-form").hidden = true;
   root<{ needed: boolean }>("/auth/setup").then(r => {
     $("#setup-form").hidden = !r.needed; $("#login-form").hidden = r.needed;
     $<HTMLInputElement>(r.needed ? "#st-token" : "#lg-email").focus();
@@ -1499,9 +1490,9 @@ $("#setup-form").addEventListener("submit", async e => {
   finally { btn.disabled = false; }
 });
 async function enter(user: Me) {
-  me = user; document.documentElement.dataset.auth = "in";
+  st.me = user; document.documentElement.dataset.auth = "in";
   renderMe(); await render();
-  if (me.mustChangePassword) changePassword(true);
+  if (st.me.mustChangePassword) changePassword(true);
 }
 $("#login-form").addEventListener("submit", async e => {
   e.preventDefault();
@@ -1510,26 +1501,25 @@ $("#login-form").addEventListener("submit", async e => {
   try {
     const r = await root<Me & { mfaRequired?: boolean; challenge?: string }>("/auth/login", { method: "POST", body: { email: str(f, "email"), password: String(f.get("password") ?? "") } });
     (e.target as HTMLFormElement).reset();
-    if (r.mfaRequired) { mfaChallenge = r.challenge!; $("#login-form").hidden = true; $("#mfa-form").hidden = false; $("#mfa-err").textContent = ""; $<HTMLInputElement>("#mfa-code").focus(); }
+    if (r.mfaRequired) { st.mfaChallenge = r.challenge!; $("#login-form").hidden = true; $("#mfa-form").hidden = false; $("#mfa-err").textContent = ""; $<HTMLInputElement>("#mfa-code").focus(); }
     else await enter(r);
   }
   catch (x) { err.textContent = x instanceof ApiError ? x.message : "Sem conexão com o servidor."; }
   finally { btn.disabled = false; }
 });
-let mfaChallenge = "";
 $("#mfa-form").addEventListener("submit", async e => {
   e.preventDefault();
   const form = e.target as HTMLFormElement, err = $("#mfa-err"), btn = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
   err.textContent = ""; btn.disabled = true;
   try {
-    const u = await root<Me>("/auth/login/mfa", { method: "POST", body: { challenge: mfaChallenge, code: str(new FormData(form), "code") } });
-    form.reset(); mfaChallenge = ""; $("#mfa-form").hidden = true; $("#login-form").hidden = false; await enter(u);
+    const u = await root<Me>("/auth/login/mfa", { method: "POST", body: { challenge: st.mfaChallenge, code: str(new FormData(form), "code") } });
+    form.reset(); st.mfaChallenge = ""; $("#mfa-form").hidden = true; $("#login-form").hidden = false; await enter(u);
   } catch (x) {
     err.textContent = x instanceof ApiError ? x.message : "Sem conexão com o servidor.";
     if (x instanceof ApiError && x.code === "MFA_EXPIRED") setTimeout(() => { $("#mfa-form").hidden = true; $("#login-form").hidden = false; }, 2500);
   } finally { btn.disabled = false; }
 });
-$("#mfa-back").addEventListener("click", () => { mfaChallenge = ""; $("#mfa-form").hidden = true; $("#login-form").hidden = false; });
+$("#mfa-back").addEventListener("click", () => { st.mfaChallenge = ""; $("#mfa-form").hidden = true; $("#login-form").hidden = false; });
 $("#me").addEventListener("click", async e => {
   const a = (e.target as HTMLElement).closest<HTMLElement>("[data-act]")?.dataset.act;
   if (a === "password") changePassword(false);
@@ -1539,7 +1529,7 @@ window.addEventListener("nf:unauthenticated", showLogin);
 // Botão "voltar" do celular e links com #: troca de tela pelo endereço.
 window.addEventListener("hashchange", () => {
   const t = location.hash.slice(1) as Tab;
-  if (t in renderers && t !== tab && me) { tab = t; menu(false); scrollTo(0, 0); render(); }
+  if (t in renderers && t !== st.tab && st.me) { st.tab = t; menu(false); scrollTo(0, 0); render(); }
 });
 
 /* ===================== Eventos (delegação) ===================== */
@@ -1555,12 +1545,12 @@ view.addEventListener("click", async e => {
     else if (d.pedit) editPay(d.pedit, Number(d.amt), d.dt!);
     else if (d.pdel) { if (confirm("Excluir este pagamento? O saldo volta a ficar em aberto.")) { await api(`/settlements/${d.pdel}`, { method: "DELETE" }); toast("Pagamento excluído."); await render(); } }
     else if (d.del) { if (confirm("Excluir esta conta? Ela some das listas (fica no histórico).")) { await api(`/titles/${d.del}`, { method: "DELETE" }); toast("Conta excluída."); await render(); } }
-    else if (d.filter) { statusFilter = d.filter as typeof statusFilter; await render(); }
-    else if (d.proj) { projMonths = Number(d.proj); await render(); }
-    else if (d.extyear) { if (d.extyear === "last6") { extTo = today().slice(0, 7); extFrom = addMonths(extTo, -5).slice(0, 7); } else { extFrom = `${d.extyear}-01`; extTo = `${d.extyear}-12`; } await render(); }
+    else if (d.filter) { st.statusFilter = d.filter as typeof st.statusFilter; await render(); }
+    else if (d.proj) { st.projMonths = Number(d.proj); await render(); }
+    else if (d.extyear) { if (d.extyear === "last6") { st.extTo = today().slice(0, 7); st.extFrom = addMonths(st.extTo, -5).slice(0, 7); } else { st.extFrom = `${d.extyear}-01`; st.extTo = `${d.extyear}-12`; } await render(); }
     else if (d.newrec !== undefined) newRec();
     else if (d.newperson !== undefined) newPerson();
-    else if (d.goto) { if (d.bkowner !== undefined) bkOwner = d.bkowner; tab = d.goto as Tab; history.pushState(null, "", `#${tab}`); scrollTo(0, 0); await render(); }
+    else if (d.goto) { if (d.bkowner !== undefined) st.bkOwner = d.bkowner; st.tab = d.goto as Tab; history.pushState(null, "", `#${st.tab}`); scrollTo(0, 0); await render(); }
     else if (d.reqok || d.reqno) {
       const id = (d.reqok ?? d.reqno)!, acc = (document.getElementById(`racc-${id}`) as HTMLSelectElement | null)?.value || null;
       const note = (document.getElementById(`rnote-${id}`) as HTMLInputElement | null)?.value.trim() || null;
@@ -1579,11 +1569,11 @@ view.addEventListener("click", async e => {
     }
     else if (d.tokrevoke) { if (confirm("Revogar esta chave? O leitor de cupons para de funcionar até você criar outra.")) { await root(`/admin/worker-tokens/${d.tokrevoke}`, { method: "DELETE" }); toast("Chave revogada."); await render(); } }
     else if (d.reqcancel) { await api(`/requests/${d.reqcancel}/cancel`, { method: "POST" }); toast("Pedido cancelado."); await render(); }
-    else if (d.reqagain) { const r = (await api<PReq[]>("/requests")).find(x => x.id === d.reqagain); if (r) reqPrefill = { d: r.description, v: r.amountCents, c: r.category }; await render(); scrollTo(0, 0); }
+    else if (d.reqagain) { const r = (await api<PReq[]>("/requests")).find(x => x.id === d.reqagain); if (r) st.reqPrefill = { d: r.description, v: r.amountCents, c: r.category }; await render(); scrollTo(0, 0); }
     else if (d.review) { await api("/conduct/checks/review", { method: "POST", body: { personId: d.person, ruleId: d.review, day: d.day, approve: d.val === "true" } }); toast(d.val === "true" ? "Aprovado." : "Recusado: não conta na nota."); await render(); }
-    else if (d.reviewall !== undefined) { for (const p of pendingCache) await api("/conduct/checks/review", { method: "POST", body: { personId: p.personId, ruleId: p.ruleId, day: p.day, approve: true } }); toast(`${pendingCache.length} aprovados.`); await render(); }
+    else if (d.reviewall !== undefined) { for (const p of st.pendingCache) await api("/conduct/checks/review", { method: "POST", body: { personId: p.personId, ruleId: p.ruleId, day: p.day, approve: true } }); toast(`${st.pendingCache.length} aprovados.`); await render(); }
     else if (d.check) { await api("/conduct/checks", { method: "POST", body: { personId: d.person, ruleId: d.check, day: d.day, checked: d.val === "true" } }); await render(); }
-    else if (d.cbweek !== undefined) { const n = Number(d.cbweek); if (n === 0) cbDate = today(); else { const x = new Date(`${cbDate}T12:00:00`); x.setDate(x.getDate() + n); cbDate = x.toLocaleDateString("sv-SE"); } await render(); }
+    else if (d.cbweek !== undefined) { const n = Number(d.cbweek); if (n === 0) st.cbDate = today(); else { const x = new Date(`${st.cbDate}T12:00:00`); x.setDate(x.getDate() + n); st.cbDate = x.toLocaleDateString("sv-SE"); } await render(); }
     else if (d.infraction !== undefined) await infractionDialog();
     else if (d.newacc !== undefined) newAccount();
     else if (d.editacc) await editAccount(d.editacc);
@@ -1591,9 +1581,9 @@ view.addEventListener("click", async e => {
     else if (d.edittr) await editTransfer(d.edittr);
     else if (d.deltr) { if (confirm("Excluir esta transferência? Os saldos das duas contas voltam ao que eram. Fica no registro de alterações.")) { await api(`/transfers/${d.deltr}`, { method: "DELETE" }); toast("Transferência excluída."); await render(); } }
     else if (d.transfer) await transferDialog(d.transfer);
-    else if (d.bkowner !== undefined) { bkOwner = d.bkowner; await render(); }
-    else if (d.strategy) { bkStrategy = d.strategy as typeof bkStrategy; await render(); }
-    else if (d.cbperson !== undefined) { cbView = d.cbperson; scrollTo(0, 0); await render(); }
+    else if (d.bkowner !== undefined) { st.bkOwner = d.bkowner; await render(); }
+    else if (d.strategy) { st.bkStrategy = d.strategy as typeof st.bkStrategy; await render(); }
+    else if (d.cbperson !== undefined) { st.cbView = d.cbperson; scrollTo(0, 0); await render(); }
     else if (d.sporadic) { await api("/conduct/sporadic", { method: "POST", body: { ruleId: d.sporadic, personId: d.person, day: today(), active: d.val === "true" } }); toast(d.val === "true" ? "Tarefa ativada para hoje." : "Tarefa desativada."); await render(); }
     else if (d.blame) await blameDialog(d.blame, d.person!, d.day!);
     else if (d.plan) await planDialog(d.plan);
@@ -1603,7 +1593,7 @@ view.addEventListener("click", async e => {
     else if (d.delentry) { if (confirm("Excluir este registro? Os pontos e a multa voltam.")) { await api(`/conduct/entries/${d.delentry}`, { method: "DELETE" }); toast("Registro excluído."); await render(); } }
     else if (d.newrule !== undefined) await editRule();
     else if (d.editrule) await editRule(d.editrule);
-    else if (d.rkweek !== undefined) { const n = Number(d.rkweek); if (n === 0) rkDate = today(); else { const x = new Date(`${rkDate}T12:00:00`); x.setDate(x.getDate() + n); rkDate = x.toLocaleDateString("sv-SE"); } await render(); }
+    else if (d.rkweek !== undefined) { const n = Number(d.rkweek); if (n === 0) st.rkDate = today(); else { const x = new Date(`${st.rkDate}T12:00:00`); x.setDate(x.getDate() + n); st.rkDate = x.toLocaleDateString("sv-SE"); } await render(); }
     else if (d.mand) { await api(`/titles/${d.mand}`, { method: "PATCH", body: { mandatory: d.val === "true" } }); toast("Classificação revisada."); await render(); }
     else if (d.editcats !== undefined) editCats((await api<string[]>("/settings/mandatory-categories")));
     else if (d.newuser !== undefined) newUser();
@@ -1619,7 +1609,7 @@ view.addEventListener("click", async e => {
     else if (d.toggleuser) { await root(`/admin/users/${d.toggleuser}`, { method: "PATCH", body: { active: d.active !== "true" } }); toast(d.active === "true" ? "Usuário desativado." : "Usuário reativado."); await render(); }
     else if (d.editperson) editPerson(d.editperson);
     else if (d.toggleperson) { await api(`/people/${d.toggleperson}`, { method: "PATCH", body: { active: d.active !== "true" } }); await render(); }
-    else if (d.seeperson) { personFilter = d.seeperson; statusFilter = "all"; tab = "pagar"; history.replaceState(null, "", "#pagar"); await render(); }
+    else if (d.seeperson) { st.personFilter = d.seeperson; st.statusFilter = "all"; st.tab = "pagar"; history.replaceState(null, "", "#pagar"); await render(); }
     else if (d.editrec) await editRec(d.editrec);
     else if (d.togglerec) { await api(`/recurrences/${d.togglerec}`, { method: "PATCH", body: { active: d.active !== "true" } }); await render(); }
   } catch (err) { fail(err); }
@@ -1658,7 +1648,7 @@ view.addEventListener("submit", async e => {
       const r = await api<{ label: string }>("/bridge", { method: "POST", body: { kind: str(f, "k"), amountCents: centsOf(f, "v"), fromAccountId: str(f, "from"), toAccountId: str(f, "to"), date: str(f, "dt") || undefined } });
       toast(`${r.label} registrado: saiu da PJ e entrou no Pessoal.`); await render();
     } else if (form.id === "rep-f") {
-      repMonth = str(new FormData(form), "m") || repMonth; await render();
+      st.repMonth = str(new FormData(form), "m") || st.repMonth; await render();
     } else if (form.id === "req-f") {
       const f = new FormData(form);
       const body: Record<string, unknown> = { description: str(f, "d"), amountCents: centsOf(f, "v"), category: str(f, "c") || undefined, accountId: str(f, "a") || null };
@@ -1675,7 +1665,7 @@ view.addEventListener("submit", async e => {
       }
       toast(n ? `Orçamento salvo (${n} categoria${n > 1 ? "s" : ""}).` : "Nada mudou."); await render();
     } else if (form.id === "audit-f") {
-      const f = new FormData(form); auditQ = { actor: str(f, "actor"), area: str(f, "area"), from: str(f, "from"), to: str(f, "to") }; await render();
+      const f = new FormData(form); st.auditQ = { actor: str(f, "actor"), area: str(f, "area"), from: str(f, "from"), to: str(f, "to") }; await render();
     } else if (form.id === "ret-f") {
       const months = Number(str(new FormData(form), "m"));
       await root("/admin/audit/retention", { method: "PUT", body: { months } }); toast(months ? `Registro guardado por ${months} ${months === 1 ? "mês" : "meses"}.` : "Registro guardado sem limite."); await render();
@@ -1685,11 +1675,11 @@ view.addEventListener("submit", async e => {
       await api("/incomes/quick", { method: "POST", body: { amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null, accountId: src.accountId ?? null } });
       toast("Recebimento registrado."); await render();
     } else if (form.id === "ext") {
-      const f = new FormData(form); extFrom = str(f, "from") || extFrom; extTo = str(f, "to") || extTo;
-      if (extFrom > extTo) [extFrom, extTo] = [extTo, extFrom];
+      const f = new FormData(form); st.extFrom = str(f, "from") || st.extFrom; st.extTo = str(f, "to") || st.extTo;
+      if (st.extFrom > st.extTo) [st.extFrom, st.extTo] = [st.extTo, st.extFrom];
       await render();
     } else if (form.id === "sim") await runSim(form);
-    else if (form.id === "pmonth") { peopleMonth = str(new FormData(form), "m") || peopleMonth; await render(); }
+    else if (form.id === "pmonth") { st.peopleMonth = str(new FormData(form), "m") || st.peopleMonth; await render(); }
   } catch (err) { fail(err); }
 });
 
@@ -1716,7 +1706,7 @@ applyLook();
 
 view.addEventListener("change", e => {
   const el = e.target as HTMLSelectElement;
-  if (el.id === "pfilter") { personFilter = el.value; render(); }
+  if (el.id === "pfilter") { st.personFilter = el.value; render(); }
 });
 
 root<Me>("/auth/me").then(enter).catch(showLogin);
