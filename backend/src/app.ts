@@ -330,6 +330,12 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.post("/:entity/accounts", async c => c.json(await accounts.createAccount(db, c.get("entity"), c.get("user"), await body(c, accountCreate)), 201));
   v1.patch("/:entity/accounts/:id", async c => c.json(await accounts.updateAccount(db, c.get("entity"), param(c, "id"), await body(c, accountPatch))));
   v1.post("/:entity/accounts/:id/bill", async c => c.json(await accounts.addCardBill(db, c.get("entity"), c.get("user"), param(c, "id"), await body(c, billInput)), 201));
+  v1.post("/:entity/import/accounts", async c => {
+    requireAdmin(c);
+    const i = await body(c, z.object({ version: z.literal(1), items: z.array(z.record(z.string(), z.unknown())).min(1).max(200) }).strict());
+    return c.json(await accounts.importAccounts(db, c.get("entity"), c.get("user"), i.items as unknown as accounts.ImportItem[], c.req.query("dryRun") === "1",
+      x => accountCreate.parse(x) as accounts.AccountInput));
+  });
   v1.get("/:entity/transfers", async c => c.json(await accounts.listTransfers(db, c.get("entity"), Math.min(200, Number(c.req.query("limit") ?? 50) || 50))));
   v1.patch("/:entity/transfers/:id", async c => c.json(await accounts.updateTransfer(db, c.get("entity"), c.get("user"), param(c, "id"), await body(c, transferInput.partial().strict()))));
   v1.delete("/:entity/transfers/:id", async c => { await accounts.deleteTransfer(db, c.get("entity"), c.get("user"), param(c, "id")); return c.body(null, 204); });

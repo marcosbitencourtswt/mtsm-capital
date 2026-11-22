@@ -715,3 +715,29 @@ describe("Registro de alterações e transferências", () => {
     await db.query("UPDATE app_user SET is_root = false WHERE email = 'admin@familia.test'");
   });
 });
+
+describe("Importar cadastro", () => {
+  it("prévia não grava, cria o que é novo, não duplica e aponta erros", async () => {
+    const file = { version: 1, items: [
+      { type: "CHECKING", institution: "Banco Imp", name: "Conta", owner: "Thais", openingBalanceCents: 123456 },
+      { type: "CARD", institution: "Banco Imp", name: "Cartão", owner: "Marcos", creditLimitCents: 500000, closingDay: 3, dueDay: 10, monthlyRateBp: 1320,
+        currentBill: { amountCents: 263500, dueDate: "2027-08-10" } },
+      { type: "LOAN", institution: "Pessoa Imp", name: "Empréstimo pessoal", owner: "Marcos", negativado: false,
+        loan: { installmentCents: 100000, remaining: 3, firstOpenDueDate: "2027-08-15" } },
+      { type: "LOAN", institution: "Loja Imp", name: "Sem parcelas", owner: "Marcos" },
+      { type: "CHECKING", institution: "Banco Imp", name: "Fantasma", owner: "Ninguém" },
+    ] };
+    const pre = (await req("POST", `${P}/import/accounts?dryRun=1`, file)).json;
+    expect(pre.rows.map((r: { status: string }) => r.status)).toEqual(["novo", "novo", "novo", "erro", "erro"]);
+    expect(pre.rows[1].summary).toContain("juros 13,2% a.m.");
+    expect((await req("GET", `${P}/accounts`)).json.some((a: { institution: string }) => a.institution === "Banco Imp")).toBe(false);
+    const done = (await req("POST", `${P}/import/accounts`, file)).json;
+    expect(done.created).toBe(3);
+    const accs = (await req("GET", `${P}/accounts`)).json.filter((a: { institution: string }) => a.institution?.endsWith("Imp"));
+    expect(accs).toHaveLength(3);
+    expect(accs.find((a: { type: string }) => a.type === "CHECKING")).toMatchObject({ ownerName: "Thaís", balanceCents: 123456 });
+    const again = (await req("POST", `${P}/import/accounts`, file)).json;
+    expect(again.created).toBe(0);
+    expect(again.rows.slice(0, 3).every((r: { status: string }) => r.status === "ja_existe")).toBe(true);
+  });
+});

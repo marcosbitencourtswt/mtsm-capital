@@ -388,6 +388,9 @@ async function config() {
          <div class="row"><button class="ghost sm" data-mfaoff>Desativar</button></div>`
       : `<p class="muted">Protege sua conta mesmo se alguém descobrir sua senha. Grátis: usa o Google Authenticator ou o Microsoft Authenticator no celular (sem SMS).</p>
          <div class="row"><button class="sm" data-mfaon>Ativar</button></div>`}</div>
+  ${isAdmin() ? `<div class="card"><h3>Importar cadastro</h3>
+    <p class="muted">Carga inicial de bancos, cartões e dívidas a partir do arquivo que o assistente gera com os seus prints. Antes de gravar, o sistema mostra a prévia. Importar o mesmo arquivo de novo não duplica.</p>
+    <label class="inline"><input type="file" accept=".json,application/json" data-importfile style="position:absolute;width:1px;height:1px;opacity:0"><span class="btnlike">Escolher arquivo .json</span></label></div>` : ""}
   <div class="row spread"><h2>Contas automáticas</h2>${isAdmin() ? "<button data-newrec>+ Nova</button>" : ""}</div>
   <p class="muted">Geradas todo mês sozinhas (mês atual e próximo). Sem valor padrão, a conta nasce "sem valor" e o 1º pagamento define; o mês seguinte usa o último valor.</p>
   <div class="list">${recs.length ? recs.map(r => `<div class="item">
@@ -1054,6 +1057,28 @@ async function adminPage() {
 }
 
 /* ===================== Sessão: login, senha, sair ===================== */
+/* ===================== Importar cadastro ===================== */
+interface ImportRes { dryRun: boolean; created: number; rows: { index: number; status: "novo" | "ja_existe" | "erro"; type: string; label: string; owner: string; summary: string; error?: string }[]; }
+const IMPORT_TYPE: Record<string, string> = { CHECKING: "Conta", SAVINGS: "Poupança", INVESTMENT: "Investimento", CARD: "Cartão", LOAN: "Dívida", CASH: "Dinheiro" };
+async function importFile(file: File) {
+  let data: unknown;
+  try { data = JSON.parse(await file.text()); } catch { toast("Arquivo inválido: não é um JSON.", true); return; }
+  const pre = await api<ImportRes>("/import/accounts?dryRun=1", { method: "POST", body: data });
+  const n = (s: string) => pre.rows.filter(r => r.status === s).length;
+  const ST = { novo: `<span class="chip SETTLED">criar</span>`, ja_existe: `<span class="chip NO_VALUE">já existe</span>`, erro: `<span class="chip OVERDUE">erro</span>` };
+  openDialog("Prévia da importação", `
+    <p class="full"><b>${n("novo")}</b> para criar · ${n("ja_existe")} já existem (serão ignorados) · ${n("erro") ? `<b class="neg">${n("erro")} com erro</b>` : "nenhum erro"}</p>
+    <div class="full" style="max-height:55vh;overflow:auto"><ul class="imp">${pre.rows.map(r => `<li>
+      <div>${ST[r.status]} <b>${esc(IMPORT_TYPE[r.type] ?? r.type)}</b> · ${esc(r.label)}</div>
+      <div class="muted">${esc(r.owner)} · ${r.error ? `<span class="neg">${esc(r.error)}</span>` : esc(r.summary)}</div></li>`).join("")}</ul></div>
+    <p class="muted full">Confira cada linha com o app do banco. Itens com erro não são gravados; corrija e importe de novo.</p>`,
+    n("novo") ? `Criar ${n("novo")}` : "Fechar", async () => {
+    if (!n("novo")) return;
+    const r = await api<ImportRes>("/import/accounts", { method: "POST", body: data });
+    toast(`${r.created} cadastro(s) criado(s). Veja em Bancos e dívidas.`);
+  });
+}
+
 /* ===================== Verificação em duas etapas ===================== */
 async function mfaSetup() {
   const s = await root<{ secret: string; uri: string }>("/auth/2fa/setup", { method: "POST" });
@@ -1234,6 +1259,10 @@ function srcOf(f: FormData): { accountId?: string; cardAccountId?: string } {
   if (v.startsWith("card:")) return { cardAccountId: v.slice(5) };
   return {};
 }
+view.addEventListener("change", async e => {
+  const t = e.target as HTMLInputElement;
+  if (t.matches("[data-importfile]") && t.files?.[0]) { try { await importFile(t.files[0]); } catch (err) { fail(err); } finally { t.value = ""; } }
+});
 view.addEventListener("submit", async e => {
   const form = e.target as HTMLFormElement;
   e.preventDefault();

@@ -296,3 +296,45 @@ export async function deleteTransfer(db: Db, e: Entity, u: SessionUser, id: stri
   await transferOf(db, e, id, u);
   await db.query("UPDATE transfer SET deleted_at = now() WHERE id = $1", [id]);
 }
+
+/* ---------- Carga inicial por arquivo (gerado a partir dos prints, conferido pelo usuário) ---------- */
+export interface ImportItem extends Omit<AccountInput, "ownerPersonId"> { owner?: string | null; }
+export interface ImportRow { index: number; status: "novo" | "ja_existe" | "erro"; type: string; label: string; owner: string; summary: string; error?: string; }
+const fmt = (c?: number | null) => (c == null ? "—" : (c / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" }));
+/**
+ * dryRun = true só mostra o que seria criado. Itens iguais (mesmo tipo, banco, nome e dono) não duplicam:
+ * importar o mesmo arquivo duas vezes é seguro.
+ */
+export async function importAccounts(db: Db, e: Entity, u: SessionUser, items: ImportItem[], dryRun: boolean, validate: (x: unknown) => AccountInput) {
+  const people = (await db.query<{ id: string; name: string }>("SELECT id, name FROM person WHERE entity_code = $1 AND active", [e])).rows;
+  const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+  const existing = (await db.query(`SELECT a.type, lower(a.name) AS name, lower(coalesce(i.name, '')) AS inst, a.owner_person_id FROM account a
+    LEFT JOIN institution i ON i.id = a.institution_id WHERE a.entity_code = $1 AND a.active`, [e])).rows;
+  const out: ImportRow[] = [];
+  const seen = new Set<string>();
+  for (const [index, raw] of items.entries()) {
+    const label = [raw.institution, raw.name].filter(Boolean).join(" · ") || "(sem nome)";
+    const base = { index, type: String(raw.type ?? "?"), label, owner: raw.owner ?? "Casa / dos dois" };
+    try {
+      const p = raw.owner ? people.find(x => norm(x.name) === norm(raw.owner!)) : null;
+      if (raw.owner && !p) throw new AppError(422, "OWNER", `Pessoa "${raw.owner}" não cadastrada em Pessoas da casa.`);
+      const { owner: _o, ...rest } = raw;
+      const i = validate({ ...rest, ownerPersonId: p?.id ?? null });
+      if (i.type === "LOAN" && !i.loan) throw new AppError(422, "LOAN_REQUIRED", "Dívida sem parcela: informe valor da parcela, quantas faltam e o vencimento da mais antiga em aberto (valor único = 1 parcela).");
+      const key = `${i.type}|${(i.institution ?? "").trim().toLowerCase()}|${i.name.trim().toLowerCase()}|${i.ownerPersonId ?? ""}`;
+      const summary = i.type === "CARD" ? `limite ${fmt(i.creditLimitCents)} · fecha ${i.closingDay ?? "—"} · vence ${i.dueDay ?? "—"} · fatura ${fmt(i.currentBill?.amountCents)}${i.currentBill ? ` em ${i.currentBill.dueDate.split("-").reverse().join("/")}` : ""}`
+        : i.type === "LOAN" ? `${i.loan?.remaining ?? 0}× ${fmt(i.loan?.installmentCents)} · 1ª em aberto ${i.loan?.firstOpenDueDate.split("-").reverse().join("/") ?? "—"}${i.negativado ? " · negativado" : ""}`
+        : `saldo ${fmt(i.openingBalanceCents ?? 0)}`;
+      const rate = i.monthlyRateBp != null ? ` · juros ${(i.monthlyRateBp / 100).toLocaleString("pt-BR")}% a.m.` : "";
+      const dup = seen.has(key) || existing.some(x => x.type === i.type && x.name === i.name.trim().toLowerCase() && x.inst === (i.institution ?? "").trim().toLowerCase() && (x.owner_person_id ?? null) === (i.ownerPersonId ?? null));
+      seen.add(key);
+      if (dup) { out.push({ ...base, status: "ja_existe", summary: summary + rate }); continue; }
+      if (!dryRun) await createAccount(db, e, u, i);
+      out.push({ ...base, status: "novo", summary: summary + rate });
+    } catch (err) {
+      const msg = err instanceof AppError ? err.message : (err as { issues?: { path: (string | number)[]; message: string }[] }).issues?.map(x => `${x.path.join(".")}: ${x.message}`).join("; ") ?? String(err);
+      out.push({ ...base, status: "erro", summary: "", error: msg });
+    }
+  }
+  return { dryRun, created: dryRun ? 0 : out.filter(r => r.status === "novo").length, rows: out };
+}

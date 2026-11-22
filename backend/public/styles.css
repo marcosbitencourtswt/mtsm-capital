@@ -299,3 +299,11 @@ button.card.debt:hover { background: var(--surface); border-color: var(--accent)
 .debt .meta { font-size: 13px; color: var(--ink-muted); display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .debt .meta b { color: var(--ink); font-weight: 600; }
 .debt .meta .neg { color: var(--danger); }
+
+.btnlike { display: inline-flex; align-items: center; height: 40px; padding: 0 var(--space-4); border-radius: var(--radius-sm); border: 1px solid var(--line-strong);
+  background: var(--surface); color: var(--ink); font-weight: 600; font-size: 14px; cursor: pointer; }
+.btnlike:hover { background: var(--surface-sunken); }
+label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--focus); outline-offset: 2px; }
+.imp { list-style: none; margin: 0; padding: 0; }
+.imp li { padding: 10px 0; border-bottom: 1px solid var(--line); display: grid; gap: 4px; font-size: 14px; }
+.imp li:last-child { border-bottom: 0; }
