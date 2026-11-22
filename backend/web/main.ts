@@ -16,7 +16,7 @@ const fail = (e: unknown) => toast(e instanceof ApiError ? e.message : "Sem cone
 const NATURE: Record<string, string> = { EXPENSE: "Conta", DEBT: "Dívida", CARD: "Cartão", INCOME: "Receita", LOAN_IN: "Empréstimo" };
 const STATUS: Record<string, string> = { OPEN: "Em aberto", OVERDUE: "Vencida", SETTLED: "Quitada", NO_VALUE: "Sem valor" };
 const CATEGORIES = ["ALIMENTACAO", "MORADIA", "AGUA", "LUZ", "INTERNET", "FIXO", "TRANSPORTE", "SAUDE", "EDUCACAO",
-  "DELIVERY", "RESTAURANTE", "LAZER", "ROUPAS", "BELEZA", "PRESENTES", "ASSINATURAS", "DIVIDA", "CARTAO", "RENDA", "OUTROS"];
+  "DELIVERY", "RESTAURANTE", "LAZER", "ROUPAS", "BELEZA", "PRESENTES", "ASSINATURAS", "DIVIDA", "CARTAO", "MESADA", "RENDA", "VENDAS", "SERVICOS", "OUTROS"];
 
 /* Usuário logado */
 let me: Me | null = null;
@@ -113,6 +113,17 @@ async function painel() {
       <div><label>Categoria</label><select name="c">${catOptions("ALIMENTACAO")}</select></div>
       <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
       ${personSelect()}
+      <div><button>Registrar</button></div>
+    </form>
+  </div>
+  <div class="card">
+    <h3>Já recebi</h3>
+    <form class="form" id="quick-in">
+      <div><label>Valor (R$)</label><input name="v" inputmode="decimal" placeholder="0,00" required></div>
+      <div><label>De quê</label><input name="d" placeholder="ex.: escova, venda de cosmético" required></div>
+      <div><label>Tipo</label><select name="c"><option value="SERVICOS">Serviço</option><option value="VENDAS">Venda</option><option value="RENDA">Renda</option><option value="OUTROS">Outros</option></select></div>
+      <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
+      ${personSelect(me?.personId)}
       <div><button>Registrar</button></div>
     </form>
   </div>
@@ -429,82 +440,194 @@ function editPerson(id: string) {
 }
 
 /* ===================== Combinados ===================== */
-interface Cell { ruleId: string; done: boolean; applies: boolean; checkedAt: string | null; by: string | null; }
-interface BoardRow { personId: string; name: string; nickname: string | null; hasLogin: boolean; grid: { day: string; habits: Cell[] }[]; fullDays: number; daysCounted: number;
-  habitsDone: number; habitsDue: number; infractions: number; pointsLost: number; finesWeekCents: number; balanceCents: number; }
-interface Board { week: { start: string; end: string }; today: string; habits: { id: string; name: string }[]; rows: BoardRow[]; mostConsistent: string | null;
-  entries: { id: string; personId: string; personName: string; kind: "HABIT_MISS" | "INFRACTION" | "PAYMENT" | "WAIVER"; day: string; points: number; amountCents: number; note: string | null; by: string | null }[]; }
-interface Rule { id: string; kind: "HABIT" | "INFRACTION"; name: string; points: number; fineCents: number; sort: number; active: boolean; }
+interface Item { ruleId: string; name: string; schedule: "DAILY" | "ROTATION" | "SPORADIC"; done: boolean; checkedAt: string | null; by: string | null; }
+interface Score { due: number; done: number; penaltyPoints: number; percent: number; }
+interface BoardRow { personId: string; name: string; nickname: string | null; hasLogin: boolean; grid: { day: string; items: Item[] }[]; fullDays: number; daysCounted: number;
+  habitsDone: number; habitsDue: number; infractions: number; pointsLost: number; finesWeekCents: number; balanceCents: number; month: Score; }
+interface Board { week: { start: string; end: string }; today: string; rows: BoardRow[]; mostConsistent: string | null;
+  rotations: { ruleId: string; name: string; today: string | null; tomorrow: string | null }[];
+  sporadic: { ruleId: string; name: string; people: { personId: string; name: string; activeToday: boolean }[] }[];
+  entries: { id: string; personId: string; personName: string; kind: "HABIT_MISS" | "INFRACTION" | "PAYMENT" | "WAIVER"; ruleId: string | null; day: string; points: number; amountCents: number; note: string | null; by: string | null }[]; }
+interface Rule { id: string; kind: "HABIT" | "INFRACTION"; name: string; points: number; fineCents: number; sort: number; active: boolean;
+  schedule: "DAILY" | "ROTATION" | "SPORADIC"; description: string | null; assignees: { personId: string; position: number }[]; }
+interface Allow { personId: string; name: string; nickname: string | null; mode: "MONEY" | "STARS" | "NONE"; baseCents: number; consequence: string | null; deductFines: boolean;
+  due: number; done: number; penaltyPoints: number; percent: number; grossCents: number; finesBalanceCents: number; finesToDeductCents: number; payoutCents: number;
+  stars: number; zeroed: boolean; closed: null | { percent: number; payoutCents: number; finesDeductedCents: number; stars: number; consequence: string | null }; }
+interface AllowanceResp { month: string; inProgress: boolean; people: Allow[]; }
 
+const SCHED: Record<string, string> = { DAILY: "Todo dia", ROTATION: "Revezamento", SPORADIC: "Avulsa" };
 const dayOf = (r: BoardRow, day: string) => r.grid.find(g => g.day === day);
-const dots = (cells: Cell[] | undefined, habits: Board["habits"]) => `<span class="dots" role="img" aria-label="${cells ? cells.filter(c => c.done).length : 0} de ${habits.length} hábitos">${
-  habits.map((h, i) => { const c = cells?.[i]; return `<i class="${c?.done ? "on" : c && !c.applies ? "na" : ""}" title="${esc(h.name)}${c?.done ? " ✓" : ""}"></i>`; }).join("")}</span>`;
+const dots = (items: Item[] | undefined) => items && items.length ? `<span class="dots" role="img" aria-label="${items.filter(c => c.done).length} de ${items.length} tarefas">${
+  items.map(c => `<i class="${c.done ? "on" : ""}" title="${esc(c.name)}${c.done ? " ✓" : ""}"></i>`).join("")}</span>` : `<span class="muted">—</span>`;
+const pctBar = (p: number) => `<div class="bar"><i style="width:${Math.max(0, Math.min(100, p))}%;background:${p >= 70 ? "var(--success)" : p >= 40 ? "var(--warning)" : "var(--danger)"}"></i></div>`;
+const fmtPct = (p: number) => `${p.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`;
+const stars = (n: number) => n ? `${"★".repeat(Math.min(n, 30))}${n > 30 ? ` +${n - 30}` : ""}` : "nenhuma ainda";
 
-/** Painel: bolinhas de hoje de todo mundo + cobrança para quem está logado. */
+/** Painel: tarefas de hoje de todo mundo + cobrança para quem está logado. */
 function todayCard(b: Board) {
-  if (!b.habits.length || !b.rows.length) return "";
+  if (!b.rows.some(r => dayOf(r, b.today)?.items.length)) return "";
   const meRow = b.rows.find(r => r.personId === me?.personId);
-  const missing = meRow ? b.habits.filter((_, i) => !dayOf(meRow, b.today)?.habits[i]?.done && dayOf(meRow, b.today)?.habits[i]?.applies) : [];
-  return `${missing.length ? `<div class="alert danger"><b>Combinados de hoje:</b> falta ${missing.map(h => esc(h.name)).join(", ")}.
+  const missing = meRow ? (dayOf(meRow, b.today)?.items ?? []).filter(i => !i.done) : [];
+  return `${missing.length ? `<div class="alert danger"><b>Seus combinados de hoje:</b> falta ${missing.map(h => esc(h.name)).join(", ")}.
       <button class="sm" data-goto="combinados">Marcar agora</button></div>` : ""}
-    <div class="card"><div class="row spread"><h3 style="margin:0">Combinados de hoje</h3><button class="ghost sm" data-goto="combinados">Ver placar</button></div>
-    <div class="today-list">${b.rows.map(r => `<div><span>${esc(r.name)}${nick(r.nickname)}</span>${dots(dayOf(r, b.today)?.habits, b.habits)}</div>`).join("")}</div></div>`;
+    <div class="card"><div class="row spread"><h3 style="margin:0">Combinados de hoje</h3><button class="ghost sm" data-goto="combinados">Ver tudo</button></div>
+    ${b.rotations.length ? `<p class="muted" style="margin:8px 0 0">${b.rotations.map(r => `${esc(r.name)}: <b>${esc(r.today ?? "—")}</b>`).join(" · ")}</p>` : ""}
+    <div class="today-list">${b.rows.filter(r => dayOf(r, b.today)?.items.length).map(r => `<div><span>${esc(r.name)}${nick(r.nickname)}</span>${dots(dayOf(r, b.today)?.items)}</div>`).join("")}</div></div>`;
 }
 
 let cbDate = today();
+let cbView = ""; // "" = família; senão id da pessoa
 async function combinadosPage() {
   if (getEntity() !== "personal") return `<div class="empty">Os Combinados são da família (entidade Pessoal).</div>`;
-  const [b, rules] = await Promise.all([api<Board>(`/conduct/board?date=${cbDate}`), api<Rule[]>("/conduct/rules")]);
-  const meRow = b.rows.find(r => r.personId === me?.personId);
-  const yesterday = (() => { const x = new Date(`${b.today}T12:00:00`); x.setDate(x.getDate() - 1); return x.toLocaleDateString("sv-SE"); })();
-  const toggles = (row: BoardRow, day: string, label: string) => {
-    const cells = dayOf(row, day)?.habits ?? [];
-    return `<div class="habit-day"><span class="muted">${label}</span><div class="habit-btns">${b.habits.map((h, i) => {
-      const c = cells[i]; if (c && !c.applies) return "";
-      return `<button class="habit ${c?.done ? "done" : ""}" data-check="${h.id}" data-person="${row.personId}" data-day="${day}" data-val="${!c?.done}" aria-pressed="${!!c?.done}">
-        <span class="tick">${c?.done ? "✓" : ""}</span>${esc(h.name)}</button>`; }).join("")}</div></div>`;
-  };
-  const isThisWeek = b.week.start <= b.today && b.today <= b.week.end;
-  const fines = (r: BoardRow) => r.balanceCents ? `<span class="chip OVERDUE">deve ${money(r.balanceCents)}</span>` : `<span class="chip SETTLED">sem multa</span>`;
-  const kindLabel: Record<string, string> = { HABIT_MISS: "Não fez", INFRACTION: "Ocorrência", PAYMENT: "Pagou multa", WAIVER: "Multa perdoada" };
-  return `<p class="muted">Cada um marca os próprios hábitos (hoje e ontem). Dia que passa sem marcar vira falta. Tudo fica visível para a família, com quem marcou e a hora.</p>
-  ${meRow && isThisWeek ? `<div class="card"><h3>Meus combinados</h3>${toggles(meRow, b.today, "Hoje")}${dayOf(meRow, yesterday) ? toggles(meRow, yesterday, "Ontem") : ""}</div>` : ""}
-  <div class="weeknav"><button class="ghost sm" data-cbweek="-7" aria-label="Semana anterior">◀</button><b>${br(b.week.start)} a ${br(b.week.end)}</b>
+  const [b, rules, al] = await Promise.all([api<Board>(`/conduct/board?date=${cbDate}`), api<Rule[]>("/conduct/rules"), api<AllowanceResp>("/conduct/allowance")]);
+  if (!cbView && me?.personId && b.rows.some(r => r.personId === me!.personId) && !isGuardian()) cbView = me.personId;
+  const tabs = `<div class="person-tabs" role="tablist">
+    <button role="tab" class="${cbView === "" ? "on" : ""}" data-cbperson="">Família</button>
+    ${b.rows.map(r => `<button role="tab" class="${cbView === r.personId ? "on" : ""}" data-cbperson="${r.personId}">${esc(r.name)}${r.personId === me?.personId ? " (eu)" : ""}</button>`).join("")}
+    ${isAdmin() ? `<button role="tab" class="${cbView === "admin" ? "on" : ""}" data-cbperson="admin">Regras e mesadas</button>` : ""}</div>`;
+  if (cbView === "admin" && isAdmin()) return tabs + await combinadosAdmin(rules, al);
+  const row = b.rows.find(r => r.personId === cbView);
+  return tabs + (row ? personView(b, row, al.people.find(a => a.personId === row.personId)) : familyView(b, al));
+}
+
+function weekNav(b: Board) {
+  return `<div class="weeknav"><button class="ghost sm" data-cbweek="-7" aria-label="Semana anterior">◀</button><b>${br(b.week.start)} a ${br(b.week.end)}</b>
     <button class="ghost sm" data-cbweek="7" aria-label="Próxima semana">▶</button>${cbDate !== today() ? `<button class="ghost sm" data-cbweek="0">Esta semana</button>` : ""}
-    ${isGuardian() ? `<button class="sm" data-infraction style="margin-left:auto">Registrar ocorrência</button>` : ""}</div>
-  <div class="podium">${b.rows.map(r => `<div class="rk${r.personId === b.mostConsistent ? " first" : ""}">
+    ${isGuardian() ? `<button class="sm" data-infraction style="margin-left:auto">Registrar ocorrência</button>` : ""}</div>`;
+}
+function rewardLine(a: Allow | undefined) {
+  if (!a || a.mode === "NONE") return `<span class="muted">Participa da nota, sem mesada.</span>`;
+  if (a.mode === "STARS") return `<span class="stars" aria-label="${a.stars} estrelas">${stars(a.stars)}</span>`;
+  return `Previsão da mesada: <b>${money(a.payoutCents)}</b> <span class="muted">de ${money(a.baseCents)}${a.finesToDeductCents ? ` · −${money(a.finesToDeductCents)} de multas` : ""}</span>`;
+}
+
+function familyView(b: Board, al: AllowanceResp) {
+  const kindLabel: Record<string, string> = { HABIT_MISS: "Não fez", INFRACTION: "Ocorrência", PAYMENT: "Pagou multa", WAIVER: "Multa perdoada" };
+  return `${b.rotations.length ? `<div class="card"><h3>Revezamento</h3><div class="today-list">${b.rotations.map(r => `<div><span>${esc(r.name)}</span>
+      <span>hoje <b>${esc(r.today ?? "—")}</b> · amanhã ${esc(r.tomorrow ?? "—")}</span></div>`).join("")}</div></div>` : ""}
+  ${isGuardian() && b.sporadic.length ? `<div class="card"><h3>Tarefas avulsas de hoje</h3><div class="row">${b.sporadic.flatMap(s => s.people.map(p =>
+      `<button class="${p.activeToday ? "" : "ghost"} sm" data-sporadic="${s.ruleId}" data-person="${p.personId}" data-val="${!p.activeToday}">${p.activeToday ? "✓ " : "+ "}${esc(s.name)} · ${esc(p.name)}</button>`)).join("")}</div>
+      <p class="muted">Ative quando pedir a tarefa; a pessoa marca quando fizer.</p></div>` : ""}
+  ${weekNav(b)}
+  <div class="podium">${b.rows.map(r => { const a = al.people.find(x => x.personId === r.personId); return `<div class="rk${r.personId === b.mostConsistent ? " first" : ""}">
     <span class="pos">${r.personId === b.mostConsistent ? "Mais constante da semana" : `${r.fullDays} de ${r.daysCounted} dias completos`}</span>
     <span class="name">${esc(r.name)}${nick(r.nickname)}</span>
-    <div class="week-grid">${r.grid.map(g => `<div><small>${["dom", "seg", "ter", "qua", "qui", "sex", "sáb"][new Date(`${g.day}T12:00:00`).getDay()]}</small>${dots(g.habits, b.habits)}</div>`).join("")}</div>
-    <span class="sub">${r.habitsDone} de ${r.habitsDue} hábitos · ${r.infractions} ocorrência(s) · −${r.pointsLost} pts</span>
-    <span class="sub">Multas na semana: ${money(r.finesWeekCents)}</span>
-    <div class="row">${fines(r)}${isAdmin() && r.balanceCents ? `<button class="ghost sm" data-settle="${r.personId}" data-bal="${r.balanceCents}">Quitar</button>` : ""}
-      ${isGuardian() && r.personId !== me?.personId && isThisWeek ? `<button class="ghost sm" data-markfor="${r.personId}">Marcar por ${esc(r.name)}</button>` : ""}</div>
-  </div>`).join("") || `<div class="empty">Cadastre as pessoas em Pessoas da casa.</div>`}</div>
+    <div class="row spread"><span class="sub">Nota do mês</span><b>${fmtPct(r.month.percent)}</b></div>${pctBar(r.month.percent)}
+    <span class="sub">${rewardLine(a)}</span>
+    <div class="week-grid">${r.grid.map(g => `<div><small>${["dom", "seg", "ter", "qua", "qui", "sex", "sáb"][new Date(`${g.day}T12:00:00`).getDay()]}</small>${dots(g.items)}</div>`).join("")}</div>
+    <div class="row">${r.balanceCents ? `<span class="chip OVERDUE">deve ${money(r.balanceCents)}</span>` : `<span class="chip SETTLED">sem multa</span>`}
+      <button class="ghost sm" data-cbperson="${r.personId}">Abrir</button></div>
+  </div>`; }).join("") || `<div class="empty">Cadastre as pessoas em Pessoas da casa.</div>`}</div>
   <div class="card"><h3>Registro da semana</h3>${b.entries.length ? `<ul class="pays">${b.entries.map(e => `<li>
     <span><b>${esc(e.personName)}</b> · ${kindLabel[e.kind]}: ${esc((e.note ?? "").replace(/^Não marcou: /, ""))}${e.by ? ` <span class="muted">(por ${esc(e.by)})</span>` : ""}</span>
     <span class="row"><span class="muted">${br(e.day)}</span>${e.amountCents ? `<span class="${e.kind === "PAYMENT" || e.kind === "WAIVER" ? "pos" : "neg"}">${money(e.amountCents)}</span>` : ""}${e.points ? `<span class="muted">−${e.points} pts</span>` : ""}
-    ${isGuardian() && e.kind !== "HABIT_MISS" ? `<button class="danger sm" data-delentry="${e.id}">Excluir</button>` : ""}</span></li>`).join("")}</ul>` : `<p class="muted">Nada registrado nesta semana.</p>`}</div>
-  <div class="card"><div class="row spread"><h3 style="margin:0">Regras</h3>${isAdmin() ? `<button class="ghost sm" data-newrule>+ Nova regra</button>` : ""}</div>
-    <div class="scroll"><table><tr><th>Regra</th><th>Tipo</th><th>Pontos</th><th>Multa</th><th></th></tr>
-    ${rules.map(r => `<tr><td>${esc(r.name)}${r.active ? "" : ` <span class="chip OVERDUE">pausada</span>`}</td><td>${r.kind === "HABIT" ? "Hábito diário" : "Ocorrência"}</td>
-      <td>−${r.points}</td><td>${r.fineCents ? money(r.fineCents) : "—"}</td><td>${isAdmin() ? `<button class="ghost sm" data-editrule="${r.id}">Editar</button>` : ""}</td></tr>`).join("")}</table></div>
-    <p class="muted">Hábito: multa por dia sem marcar. Ocorrência: multa a cada registro. Mudar o valor vale daqui em diante.</p></div>`;
+    ${isGuardian() && e.kind === "HABIT_MISS" && e.ruleId ? `<button class="ghost sm" data-blame="${e.ruleId}" data-person="${e.personId}" data-day="${e.day}">Apontar culpado</button>` : ""}
+    ${isGuardian() && e.kind !== "HABIT_MISS" ? `<button class="danger sm" data-delentry="${e.id}">Excluir</button>` : ""}</span></li>`).join("")}</ul>` : `<p class="muted">Nada registrado nesta semana.</p>`}</div>`;
 }
+
+function personView(b: Board, r: BoardRow, a: Allow | undefined) {
+  const self = r.personId === me?.personId, canMark = self || isGuardian();
+  const yesterday = (() => { const x = new Date(`${b.today}T12:00:00`); x.setDate(x.getDate() - 1); return x.toLocaleDateString("sv-SE"); })();
+  const toggles = (day: string, label: string) => {
+    const items = dayOf(r, day)?.items ?? [];
+    if (!items.length) return `<div class="habit-day"><span class="muted">${label}: nenhuma tarefa.</span></div>`;
+    return `<div class="habit-day"><span class="muted">${label}</span><div class="habit-btns">${items.map(i => `<div class="habit-wrap">
+      <button class="habit ${i.done ? "done" : ""}" ${canMark ? "" : "disabled"} data-check="${i.ruleId}" data-person="${r.personId}" data-day="${day}" data-val="${!i.done}" aria-pressed="${i.done}">
+        <span class="tick">${i.done ? "✓" : ""}</span><span>${esc(i.name)}${i.schedule !== "DAILY" ? `<small class="muted"> · ${SCHED[i.schedule]}</small>` : ""}</span></button>
+      ${isGuardian() && !i.done ? `<button class="ghost sm" data-blame="${i.ruleId}" data-person="${r.personId}" data-day="${day}">Culpa de outro</button>` : ""}
+      ${i.done && i.by ? `<small class="muted">marcado por ${esc(i.by)}</small>` : ""}</div>`).join("")}</div></div>`;
+  };
+  const m = r.month;
+  const isThisWeek = b.week.start <= b.today && b.today <= b.week.end;
+  return `<div class="card person-head${a?.mode === "STARS" ? " kid" : ""}">
+    <div class="row spread"><div><span class="name" style="font:600 22px/28px var(--font-display)">${esc(r.name)}</span>${nick(r.nickname)}</div>
+      ${r.balanceCents ? `<span class="chip OVERDUE">deve ${money(r.balanceCents)} em multas</span>` : ""}</div>
+    <div class="grid" style="margin:12px 0 0">
+      <div class="kpi"><div class="l">Nota do mês</div><div class="v">${fmtPct(m.percent)}</div>${pctBar(m.percent)}<div class="muted">${m.done} de ${m.due} feitas${m.penaltyPoints ? ` · −${m.penaltyPoints} por ocorrências` : ""}</div></div>
+      <div class="kpi"><div class="l">${a?.mode === "STARS" ? "Estrelas do mês" : "Recompensa"}</div><div class="v" style="font-size:18px">${rewardLine(a)}</div>
+        ${a?.zeroed && a.consequence ? `<div class="alert danger" style="margin:8px 0 0">Nota zerada: <b>${esc(a.consequence)}</b></div>` : a?.consequence ? `<div class="muted">Se zerar: ${esc(a.consequence)}</div>` : ""}</div>
+    </div></div>
+  ${isThisWeek ? `<div class="card"><h3>${self ? "Meus compromissos" : `Compromissos de ${esc(r.name)}`}</h3>${toggles(b.today, "Hoje")}${dayOf(r, yesterday) ? toggles(yesterday, "Ontem") : ""}
+    ${!canMark ? `<p class="muted">Só ${esc(r.name)} e os responsáveis marcam.</p>` : ""}</div>` : ""}
+  ${weekNav(b)}
+  <div class="card scroll"><table><tr><th>Dia</th><th>Tarefas</th><th>Feitas</th></tr>
+    ${r.grid.map(g => `<tr><td>${br(g.day)}</td><td>${dots(g.items)}</td><td>${g.items.filter(i => i.done).length}/${g.items.length}</td></tr>`).join("")}</table></div>`;
+}
+
+async function combinadosAdmin(rules: Rule[], al: AllowanceResp) {
+  const names = new Map(people.map(p => [p.id, p.name]));
+  const who = (r: Rule) => r.assignees.map(a => esc(names.get(a.personId) ?? "?")).join(r.schedule === "ROTATION" ? " → " : ", ") || `<span class="neg">ninguém</span>`;
+  const month = al.month;
+  return `<div class="card"><div class="row spread"><h3 style="margin:0">Modelo da família</h3><button class="ghost sm" data-template>Aplicar modelo</button></div>
+      <p class="muted">Cria as 10 atividades combinadas (louça e casa em revezamento, quarto, irmã, escola, jantar, marmita, dormir, apoio na escola, pão), a trilha da Maria e as mesadas (Sara R$ 200, Thaís R$ 2.000, Maria estrelas). Não duplica o que já existe; tudo fica editável.</p></div>
+    <div class="card"><div class="row spread"><h3 style="margin:0">Mesadas · ${monthLabel(month)}</h3><span class="muted">${al.inProgress ? "mês em andamento (prévia)" : "mês encerrado"}</span></div>
+      <div class="scroll"><table><tr><th>Pessoa</th><th>Plano</th><th>Nota</th><th>Valor</th><th>Multas</th><th>A pagar</th><th></th></tr>
+      ${al.people.map(a => `<tr><td>${esc(a.name)}</td><td>${a.mode === "MONEY" ? money(a.baseCents) : a.mode === "STARS" ? "Estrelas" : "Sem mesada"}</td>
+        <td>${fmtPct(a.percent)}</td><td>${a.mode === "MONEY" ? money(a.grossCents) : a.mode === "STARS" ? `${a.stars} ★` : "—"}</td>
+        <td>${a.finesToDeductCents ? `−${money(a.finesToDeductCents)}` : "—"}</td><td><b>${a.closed ? `${money(a.closed.payoutCents)} ✓` : a.mode === "MONEY" ? money(a.payoutCents) : "—"}</b></td>
+        <td class="row"><button class="ghost sm" data-plan="${a.personId}">Plano</button>${a.closed ? `<span class="chip SETTLED">fechado</span>` : a.mode !== "NONE" ? `<button class="sm" data-close="${a.personId}" data-month="${month}">Fechar mês</button>` : ""}</td></tr>`).join("")}</table></div>
+      <p class="muted">Mesada = valor × nota do mês (proporcional). Nota zero aplica a consequência. Ao fechar, a mesada vira conta a pagar (categoria MESADA) e as multas podem ser descontadas.</p></div>
+    <div class="card"><div class="row spread"><h3 style="margin:0">Tarefas e ocorrências</h3><button class="ghost sm" data-newrule>+ Nova regra</button></div>
+      <div class="scroll"><table><tr><th>Regra</th><th>Frequência</th><th>Quem</th><th>Pontos</th><th>Multa</th><th></th></tr>
+      ${rules.map(r => `<tr><td>${esc(r.name)}${r.active ? "" : ` <span class="chip OVERDUE">pausada</span>`}</td><td>${r.kind === "HABIT" ? SCHED[r.schedule] : "Ocorrência"}</td>
+        <td>${r.kind === "HABIT" ? who(r) : "quem causar"}</td><td>−${r.points}</td><td>${r.fineCents ? money(r.fineCents) : "—"}</td><td><button class="ghost sm" data-editrule="${r.id}">Editar</button></td></tr>`).join("")}</table></div>
+      <p class="muted">Tarefa: multa por dia sem marcar. Ocorrência: multa a cada registro. Mudar valores vale daqui em diante.</p></div>`;
+}
+
 function ruleForm(r?: Rule) {
+  const pos = new Map((r?.assignees ?? []).map(a => [a.personId, a.position]));
   return `<div class="full"><label>Nome</label><input name="name" required maxlength="80" value="${esc(r?.name)}"></div>
-    ${r ? "" : `<div class="full"><label>Tipo</label><select name="kind"><option value="HABIT">Hábito diário (cada um marca)</option><option value="INFRACTION">Ocorrência (responsável registra)</option></select></div>`}
+    ${r ? "" : `<div class="full"><label>Tipo</label><select name="kind"><option value="HABIT">Tarefa / hábito (a pessoa marca)</option><option value="INFRACTION">Ocorrência (responsável registra)</option></select></div>`}
+    ${!r || r.kind === "HABIT" ? `<div class="full" data-habit><label>Frequência</label><select name="schedule">
+      ${(["DAILY", "ROTATION", "SPORADIC"] as const).map(s => `<option value="${s}" ${r?.schedule === s ? "selected" : ""}>${s === "DAILY" ? "Todo dia (cada pessoa marcada)" : s === "ROTATION" ? "Revezamento diário (um por dia, na ordem)" : "Avulsa (responsável ativa no dia)"}</option>`).join("")}</select></div>
+    <div class="full" data-habit><label>Quem faz (e a ordem do revezamento)</label><div class="assignees">${people.filter(p => p.active).map(p => `<label class="inline">
+      <input type="checkbox" name="who" value="${p.id}" ${pos.has(p.id) ? "checked" : ""}> ${esc(p.name)}
+      <input type="number" name="pos_${p.id}" min="1" max="20" value="${pos.get(p.id) ?? ""}" placeholder="ordem" style="width:72px;height:32px"></label>`).join("")}</div></div>` : ""}
     <div><label>Pontos perdidos</label><input name="pts" type="number" min="0" max="1000" value="${r?.points ?? 1}"></div>
     <div><label>Multa (R$)</label><input name="fine" inputmode="decimal" value="${r ? moneyInput(r.fineCents) : "0,00"}"></div>
-    ${r ? `<label class="inline full"><input type="checkbox" name="active" ${r.active ? "checked" : ""}> Ativa</label>` : `<p class="muted full">Hábito novo começa a valer amanhã.</p>`}`;
+    <div class="full"><label>Observação</label><input name="desc" maxlength="200" value="${esc(r?.description)}"></div>
+    ${r ? `<label class="inline full"><input type="checkbox" name="active" ${r.active ? "checked" : ""}> Ativa</label>` : `<p class="muted full">Tarefa nova começa a valer amanhã.</p>`}`;
 }
 async function editRule(id?: string) {
   const r = id ? (await api<Rule[]>("/conduct/rules")).find(x => x.id === id) : undefined;
   openDialog(r ? "Editar regra" : "Nova regra", ruleForm(r), "Salvar", async f => {
-    const body = { name: str(f, "name"), points: Number(str(f, "pts") || 0), fineCents: centsOf(f, "fine", false) ?? 0 };
+    const who = f.getAll("who").map(String);
+    const assignees = who.map((personId, i) => ({ personId, position: Number(str(f, `pos_${personId}`)) || i + 1 })).sort((a, b) => a.position - b.position);
+    const body: Record<string, unknown> = { name: str(f, "name"), points: Number(str(f, "pts") || 0), fineCents: centsOf(f, "fine", false) ?? 0, description: str(f, "desc") || null };
+    const isHabit = r ? r.kind === "HABIT" : str(f, "kind") === "HABIT";
+    if (isHabit) Object.assign(body, { schedule: str(f, "schedule") || "DAILY", assignees });
     if (r) await api(`/conduct/rules/${r.id}`, { method: "PATCH", body: { ...body, active: f.has("active") } });
     else await api("/conduct/rules", { method: "POST", body: { ...body, kind: str(f, "kind") } });
     toast("Regra salva.");
+  });
+  const kindSel = dlgForm.querySelector<HTMLSelectElement>("select[name=kind]");
+  const sync = () => dlgForm.querySelectorAll<HTMLElement>("[data-habit]").forEach(e => (e.hidden = !!kindSel && kindSel.value !== "HABIT"));
+  kindSel?.addEventListener("change", sync); sync();
+}
+async function planDialog(personId: string) {
+  const a = (await api<AllowanceResp>("/conduct/allowance")).people.find(x => x.personId === personId); if (!a) return;
+  openDialog(`Recompensa · ${a.name}`, `
+    <div class="full"><label>Tipo</label><select name="mode"><option value="MONEY" ${a.mode === "MONEY" ? "selected" : ""}>Mesada em dinheiro (proporcional à nota)</option>
+      <option value="STARS" ${a.mode === "STARS" ? "selected" : ""}>Estrelas (crianças)</option><option value="NONE" ${a.mode === "NONE" ? "selected" : ""}>Só participa da nota</option></select></div>
+    <div><label>Valor mensal (R$)</label><input name="v" inputmode="decimal" value="${moneyInput(a.baseCents)}"></div>
+    <div><label>Se a nota zerar</label><input name="cons" maxlength="120" placeholder="ex.: Sem celular" value="${esc(a.consequence)}"></div>
+    <label class="inline full"><input type="checkbox" name="ded" ${a.deductFines ? "checked" : ""}> Descontar multas em aberto no fechamento</label>`, "Salvar", async f => {
+    await api(`/conduct/allowance/plan/${personId}`, { method: "PUT", body: { mode: str(f, "mode"), amountCents: centsOf(f, "v", false) ?? 0, consequence: str(f, "cons") || null, deductFines: f.has("ded") } });
+    toast("Plano salvo.");
+  });
+}
+async function closeDialog(personId: string, month: string) {
+  const al = await api<AllowanceResp>(`/conduct/allowance?month=${month}`); const a = al.people.find(x => x.personId === personId); if (!a) return;
+  openDialog(`Fechar ${monthLabel(month)} · ${a.name}`, `
+    <div class="full"><p>Nota: <b>${fmtPct(a.percent)}</b> (${a.done} de ${a.due} tarefas${a.penaltyPoints ? `, −${a.penaltyPoints} por ocorrências` : ""})</p>
+      ${a.mode === "MONEY" ? `<p>Mesada: ${money(a.baseCents)} × ${fmtPct(a.percent)} = <b>${money(a.grossCents)}</b></p>
+        <p>Multas em aberto: ${money(a.finesBalanceCents)}</p>` : `<p>Estrelas: <b>${a.stars}</b></p>`}
+      ${a.zeroed && a.consequence ? `<div class="alert danger">Nota zerada: <b>${esc(a.consequence)}</b></div>` : ""}
+      ${al.inProgress ? `<div class="alert">O mês ainda não acabou: os dias que faltam não entram.</div>` : ""}</div>
+    ${a.mode === "MONEY" && a.finesBalanceCents ? `<label class="inline full"><input type="checkbox" name="ded" ${a.deductFines ? "checked" : ""}> Descontar multas (−${money(a.finesToDeductCents)})</label>` : ""}
+    <p class="muted full">${a.mode === "MONEY" ? "A mesada vira uma conta a pagar (categoria MESADA) no nome da pessoa." : "Fica registrado no histórico."} Não dá para desfazer pelo app.</p>`, "Fechar mês", async f => {
+    const r = await api<{ payoutCents: number; consequence: string | null }>("/conduct/allowance/close", { method: "POST", body: { personId, month, deductFines: f.has("ded") } });
+    toast(r.consequence ? `Mês fechado. Consequência: ${r.consequence}` : `Mês fechado${r.payoutCents ? `: ${money(r.payoutCents)} em Contas a pagar` : ""}.`);
   });
 }
 async function infractionDialog() {
@@ -518,14 +641,13 @@ async function infractionDialog() {
     toast("Ocorrência registrada.");
   });
 }
-async function markFor(personId: string) {
-  const b = await api<Board>("/conduct/board"); const row = b.rows.find(r => r.personId === personId); if (!row) return;
-  openDialog(`Marcar hábitos · ${row.name}`, `<p class="muted full">Como responsável, você pode marcar por quem esqueceu. Fica registrado que foi você.</p>
-    <div class="full">${b.habits.map((h, i) => `<label class="inline"><input type="checkbox" name="h" value="${h.id}" ${dayOf(row, b.today)?.habits[i]?.done ? "checked" : ""}> ${esc(h.name)}</label>`).join("")}</div>
-    <div class="full"><label>Dia</label><input name="d" type="date" value="${b.today}" max="${b.today}"></div>`, "Salvar", async f => {
-    const sel = new Set(f.getAll("h").map(String)), day = str(f, "d") || b.today;
-    for (const h of b.habits) await api("/conduct/checks", { method: "POST", body: { personId, ruleId: h.id, day, checked: sel.has(h.id) } });
-    toast("Hábitos atualizados.");
+async function blameDialog(ruleId: string, fromPersonId: string, day: string) {
+  const b = await api<Board>("/conduct/board"); const from = b.rows.find(r => r.personId === fromPersonId);
+  openDialog("Apontar o culpado", `<p class="muted full">A tarefa de ${esc(from?.name ?? "")} em ${br(day)} não foi cumprida por causa de outra pessoa. ${esc(from?.name ?? "")} fica sem a falta; quem causou recebe a ocorrência com os pontos e a multa da tarefa.</p>
+    <div class="full"><label>Quem causou</label><select name="to" required>${b.rows.filter(r => r.personId !== fromPersonId).map(r => `<option value="${r.personId}">${esc(r.name)}</option>`).join("")}</select></div>
+    <div class="full"><label>O que aconteceu</label><input name="n" maxlength="200" placeholder="ex.: demorou para se arrumar"></div>`, "Confirmar", async f => {
+    await api("/conduct/blame", { method: "POST", body: { ruleId, day, fromPersonId, toPersonId: str(f, "to"), note: str(f, "n") || null } });
+    toast("Culpa transferida.");
   });
 }
 function settleDialog(personId: string, bal: number) {
@@ -770,7 +892,12 @@ view.addEventListener("click", async e => {
     else if (d.check) { await api("/conduct/checks", { method: "POST", body: { personId: d.person, ruleId: d.check, day: d.day, checked: d.val === "true" } }); await render(); }
     else if (d.cbweek !== undefined) { const n = Number(d.cbweek); if (n === 0) cbDate = today(); else { const x = new Date(`${cbDate}T12:00:00`); x.setDate(x.getDate() + n); cbDate = x.toLocaleDateString("sv-SE"); } await render(); }
     else if (d.infraction !== undefined) await infractionDialog();
-    else if (d.markfor) await markFor(d.markfor);
+    else if (d.cbperson !== undefined) { cbView = d.cbperson; scrollTo(0, 0); await render(); }
+    else if (d.sporadic) { await api("/conduct/sporadic", { method: "POST", body: { ruleId: d.sporadic, personId: d.person, day: today(), active: d.val === "true" } }); toast(d.val === "true" ? "Tarefa ativada para hoje." : "Tarefa desativada."); await render(); }
+    else if (d.blame) await blameDialog(d.blame, d.person!, d.day!);
+    else if (d.plan) await planDialog(d.plan);
+    else if (d.close) await closeDialog(d.close, d.month!);
+    else if (d.template !== undefined) { const r = await api<{ created: string[]; paused: string[] }>("/conduct/template", { method: "POST" }); toast(r.created.length ? `Criadas ${r.created.length} tarefas e mesadas do modelo.` : "O modelo já estava aplicado."); await render(); }
     else if (d.settle) settleDialog(d.settle, Number(d.bal));
     else if (d.delentry) { if (confirm("Excluir este registro? Os pontos e a multa voltam.")) { await api(`/conduct/entries/${d.delentry}`, { method: "DELETE" }); toast("Registro excluído."); await render(); } }
     else if (d.newrule !== undefined) await editRule();
@@ -800,6 +927,10 @@ view.addEventListener("submit", async e => {
         amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null } });
       toast(r.guard.allowed ? "Gasto registrado." : `Registrado com aviso: ${r.guard.message}`, !r.guard.allowed);
       await render();
+    } else if (form.id === "quick-in") {
+      const f = new FormData(form);
+      await api("/incomes/quick", { method: "POST", body: { amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null } });
+      toast("Recebimento registrado."); await render();
     } else if (form.id === "ext") {
       const f = new FormData(form); extFrom = str(f, "from") || extFrom; extTo = str(f, "to") || extTo;
       if (extFrom > extTo) [extFrom, extTo] = [extTo, extFrom];

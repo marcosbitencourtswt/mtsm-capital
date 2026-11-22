@@ -54,10 +54,17 @@ const userCreate = z.object({ email: z.email().max(200), name: text(80), nicknam
   role: z.enum(["ADMIN", "MEMBER"]).optional(), personId: personRef, isGuardian: z.boolean().optional(), password: z.string().max(200) }).strict();
 const userPatch = userCreate.partial().extend({ active: z.boolean().optional() }).strict();
 const ruleCreate = z.object({ kind: z.enum(["HABIT", "INFRACTION"]), name: text(80), points: z.number().int().min(0).max(1000).optional(),
-  fineCents: z.number().int().min(0).max(100000000).optional(), sort: z.number().int().min(0).max(999).optional(), active: z.boolean().optional() }).strict();
+  fineCents: z.number().int().min(0).max(100000000).optional(), sort: z.number().int().min(0).max(999).optional(), active: z.boolean().optional(),
+  schedule: z.enum(["DAILY", "ROTATION", "SPORADIC"]).optional(), description: z.string().trim().max(200).nullable().optional(),
+  assignees: z.array(z.object({ personId: uuid, position: z.number().int().min(0).max(99).optional() }).strict()).max(20).optional() }).strict();
 const rulePatch = ruleCreate.omit({ kind: true }).partial().strict();
 const checkInput = z.object({ personId: uuid, ruleId: uuid, day: isoDate, checked: z.boolean() }).strict();
 const infractionInput = z.object({ personId: uuid, ruleId: uuid, day: isoDate.optional(), note: z.string().trim().max(200).nullable().optional() }).strict();
+const sporadicInput = z.object({ ruleId: uuid, personId: uuid, day: isoDate, active: z.boolean() }).strict();
+const blameInput = z.object({ ruleId: uuid, day: isoDate, fromPersonId: uuid, toPersonId: uuid, note: z.string().trim().max(200).nullable().optional() }).strict();
+const planInput = z.object({ mode: z.enum(["MONEY", "STARS", "NONE"]), amountCents: cents.optional(), consequence: z.string().trim().max(120).nullable().optional(), deductFines: z.boolean().optional() }).strict();
+const closeInput = z.object({ personId: uuid, month: isoMonth, deductFines: z.boolean().optional() }).strict();
+const quickIncome = z.object({ amountCents: positiveCents, description: text(120), category: text(40), date: isoDate.optional(), personId: personRef }).strict();
 const settleInput = z.object({ personId: uuid, kind: z.enum(["PAYMENT", "WAIVER"]), amountCents: positiveCents, note: z.string().trim().max(200).nullable().optional() }).strict();
 const categoriesInput = z.object({ categories: z.array(text(40)).max(40) }).strict();
 const guardInput = z.object({ amountCents: positiveCents, category: text(40), date: isoDate.optional() }).strict();
@@ -268,6 +275,14 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     const personId = i.personId === undefined && c.get("entity") === "PERSONAL" ? u.personId : i.personId;
     return c.json(await svc.quickExpense(db, c.get("entity"), { ...i, personId, createdBy: u.id }), 201);
   });
+  v1.post("/:entity/incomes/quick", async c => {
+    const i = await body(c, quickIncome), u = c.get("user");
+    const personId = i.personId === undefined && c.get("entity") === "PERSONAL" ? u.personId : i.personId;
+    const t = await svc.createTitle(db, c.get("entity"), { kind: "RECEIVABLE", nature: "INCOME", counterparty: i.description, category: i.category,
+      amountCents: i.amountCents, dueDate: i.date ?? todaySP(), personId, createdBy: u.id });
+    const r = await svc.createSettlement(db, c.get("entity"), t.id, { amountCents: i.amountCents, paidOn: i.date, createdBy: u.id });
+    return c.json(r.title, 201);
+  });
   v1.get("/:entity/ranking", async c => {
     const d = c.req.query("date") ?? todaySP();
     if (!isoDate.safeParse(d).success) throw new AppError(400, "INVALID_PARAM", "date inválido (AAAA-MM-DD).");
@@ -286,6 +301,16 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.post("/:entity/conduct/checks", async c => c.json(await conduct.setCheck(db, personal(c), await body(c, checkInput))));
   v1.post("/:entity/conduct/infractions", async c => c.json(await conduct.addInfraction(db, personal(c), await body(c, infractionInput)), 201));
   v1.post("/:entity/conduct/settle", async c => c.json(await conduct.settle(db, personal(c), await body(c, settleInput)), 201));
+  v1.post("/:entity/conduct/sporadic", async c => c.json(await conduct.setSporadic(db, personal(c), await body(c, sporadicInput))));
+  v1.post("/:entity/conduct/blame", async c => c.json(await conduct.blame(db, personal(c), await body(c, blameInput)), 201));
+  v1.post("/:entity/conduct/template", async c => c.json(await conduct.applyFamilyTemplate(db, personal(c)), 201));
+  v1.get("/:entity/conduct/allowance", async c => {
+    personal(c); const m = c.req.query("month") ?? todaySP().slice(0, 7);
+    if (!isoMonth.safeParse(m).success) throw new AppError(400, "INVALID_PARAM", "month inválido (AAAA-MM).");
+    return c.json(await conduct.allowance(db, m));
+  });
+  v1.put("/:entity/conduct/allowance/plan/:personId", async c => c.json(await conduct.setPlan(db, personal(c), param(c, "personId"), await body(c, planInput))));
+  v1.post("/:entity/conduct/allowance/close", async c => c.json(await conduct.closeMonth(db, personal(c), await body(c, closeInput)), 201));
   v1.delete("/:entity/conduct/entries/:id", async c => { await conduct.deleteEntry(db, personal(c), param(c, "id")); return c.body(null, 204); });
 
   v1.get("/:entity/settings/mandatory-categories", async c => c.json(await svc.mandatoryCategories(db, c.get("entity"))));

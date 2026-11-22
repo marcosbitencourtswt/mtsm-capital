@@ -311,6 +311,7 @@ describe("Combinados (hábitos e ocorrências)", () => {
     const palavrao = rules.find(r => r.name === "Falou palavrão")!;
     // admin define multa: R$ 2 por hábito não feito (vale daqui em diante) e R$ 5 por palavrão
     await db.query("UPDATE conduct_rule SET starts_on = $1 WHERE kind = 'HABIT'", [back(3)]);
+    for (const h of [dormiu, estudou, treinou, orou]) await req("PATCH", `${P}/conduct/rules/${h!.id}`, { assignees: [{ personId: maria.id }] });
     for (const h of [dormiu, estudou, treinou, orou]) await req("PATCH", `${P}/conduct/rules/${h!.id}`, { fineCents: 200 });
     await req("PATCH", `${P}/conduct/rules/${palavrao.id}`, { fineCents: 500 });
 
@@ -330,7 +331,7 @@ describe("Combinados (hábitos e ocorrências)", () => {
     const row = b.rows.find((r: { name: string }) => r.name === "Maria");
     // faltas: 3 dias atrás (4 hábitos) + 2 dias atrás (4) + ontem (1: Orou) = 9 faltas x R$ 2 = R$ 18 + palavrão R$ 5 = R$ 23
     expect(row.balanceCents).toBe(9 * 200 + 500);
-    expect(row.grid.find((g: { day: string }) => g.day === today).habits.every((h: { done: boolean }) => h.done)).toBe(true);
+    expect(row.grid.find((g: { day: string }) => g.day === today).items.every((h: { done: boolean }) => h.done)).toBe(true);
 
     // responsável corrige: ontem ela orou sim -> a falta some
     const fix = await req("POST", `${P}/conduct/checks`, { personId: maria.id, ruleId: orou!.id, day: back(1), checked: true });
@@ -409,5 +410,83 @@ describe("Root e painel de administração", () => {
     // membro não acessa o painel
     const m = await login("membro2@familia.test", "senha-membro-dois-1");
     expect((await req("GET", "/api/v1/admin/status", undefined, { cookie: m })).status).toBe(403);
+  });
+});
+
+describe("Combinados v2 e mesada", () => {
+  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+  const back = (n: number) => new Date(new Date(`${today}T12:00:00Z`).getTime() - n * 86400000).toISOString().slice(0, 10);
+  it("modelo da família, revezamento, avulsa, culpado, mesada proporcional, nota zero e fechamento", async () => {
+    // pessoas do modelo (algumas já existem nos testes anteriores)
+    const people = async () => (await req("GET", `${P}/people`)).json as { id: string; name: string }[];
+    for (const n of ["Marcos", "Thaís", "Sara", "Maria"]) if (!(await people()).some(p => p.name === n)) await req("POST", `${P}/people`, { name: n });
+    const id = async (n: string) => (await people()).find(p => p.name === n)!.id;
+    const [marcos, thais, sara, maria] = [await id("Marcos"), await id("Thaís"), await id("Sara"), await id("Maria")];
+    await db.query("UPDATE person SET created_at = now() - interval '30 days' WHERE id = ANY($1)", [[marcos, thais, sara, maria]]);
+
+    const t = await req("POST", `${P}/conduct/template`);
+    expect(t.status).toBe(201);
+    expect(t.json.created).toContain("Louça");
+    expect((await req("POST", `${P}/conduct/template`)).json.created).toEqual([]); // não duplica
+    const rules = (await req("GET", `${P}/conduct/rules`)).json as { id: string; name: string; schedule: string; assignees: { personId: string }[] }[];
+    const louca = rules.find(r => r.name === "Louça")!, escola = rules.find(r => r.name === "Chegar na escola na hora")!, irma = rules.find(r => r.name === "Cuidar da irmã")!;
+    expect(louca.schedule).toBe("ROTATION"); expect(louca.assignees.map(a => a.personId)).toEqual([sara, marcos, thais]);
+    // vale a partir de 3 dias atrás para os testes
+    await db.query("UPDATE conduct_rule SET starts_on = $1 WHERE kind = 'HABIT' AND active", [back(3)]);
+
+    // revezamento: a cada dia uma pessoa diferente
+    const b = (await req("GET", `${P}/conduct/board`)).json;
+    const rot = b.rotations.find((r: { name: string }) => r.name === "Louça");
+    expect(rot.today).not.toBe(rot.tomorrow);
+    const dueToday = (pid: string) => b.rows.find((r: { personId: string }) => r.personId === pid).grid.find((g: { day: string }) => g.day === today)?.items.map((i: { name: string }) => i.name) ?? [];
+    const withLouca = [sara, marcos, thais].filter(p => dueToday(p).includes("Louça"));
+    expect(withLouca).toHaveLength(1);
+    expect(dueToday(maria)).toEqual(expect.arrayContaining(["Escovar os dentes"]));
+    expect(dueToday(sara)).not.toContain("Cuidar da irmã"); // avulsa só quando ativada
+
+    // avulsa ativada hoje para a Sara
+    expect((await req("POST", `${P}/conduct/sporadic`, { ruleId: irma.id, personId: sara, day: today, active: true })).status).toBe(200);
+    const b2 = (await req("GET", `${P}/conduct/board`)).json;
+    expect(b2.rows.find((r: { personId: string }) => r.personId === sara).grid.find((g: { day: string }) => g.day === today).items.map((i: { name: string }) => i.name)).toContain("Cuidar da irmã");
+
+    // culpado: ontem a Thaís atrasou na escola por causa da Sara
+    await req("PATCH", `${P}/conduct/rules/${escola.id}`, { fineCents: 300 });
+    expect((await req("POST", `${P}/conduct/blame`, { ruleId: escola.id, day: back(1), fromPersonId: thais, toPersonId: sara, note: "demorou para se arrumar" })).status).toBe(201);
+    const b3 = (await req("GET", `${P}/conduct/board`)).json;
+    const yThais = b3.rows.find((r: { personId: string }) => r.personId === thais).grid.find((g: { day: string }) => g.day === back(1));
+    expect(yThais.items.find((i: { name: string }) => i.name === "Chegar na escola na hora").done).toBe(true); // Thaís não perde
+    expect(b3.entries.some((e: { personId: string; kind: string; note: string }) => e.personId === sara && e.kind === "INFRACTION" && /causada por Sara/.test(e.note))).toBe(true);
+
+    // mesada: planos do modelo
+    const a = (await req("GET", `${P}/conduct/allowance`)).json;
+    const s = a.people.find((p: { personId: string }) => p.personId === sara), th = a.people.find((p: { personId: string }) => p.personId === thais), m = a.people.find((p: { personId: string }) => p.personId === maria);
+    expect(s).toMatchObject({ mode: "MONEY", baseCents: 20000, consequence: "Sem celular" });
+    expect(th).toMatchObject({ mode: "MONEY", baseCents: 200000 });
+    expect(m.mode).toBe("STARS");
+    expect(s.grossCents).toBe(Math.round(20000 * s.percent / 100)); // proporcional
+    expect(s.percent).toBeLessThan(100);
+
+    // Maria (estrelas) com tudo feito ontem
+    for (const r of rules.filter(r => r.assignees.some(x => x.personId === maria))) await req("POST", `${P}/conduct/checks`, { personId: maria, ruleId: r.id, day: back(1), checked: true });
+    expect((await req("GET", `${P}/conduct/allowance`)).json.people.find((p: { personId: string }) => p.personId === maria).stars).toBeGreaterThanOrEqual(3);
+
+    // nota zero da Sara (nada feito) aplica a consequência; fechamento cria a conta a pagar (se houver valor)
+    const close = await req("POST", `${P}/conduct/allowance/close`, { personId: sara, month: today.slice(0, 7) });
+    expect(close.status).toBe(201);
+    expect((await req("POST", `${P}/conduct/allowance/close`, { personId: sara, month: today.slice(0, 7) })).status).toBe(409);
+    if (s.zeroed) expect(close.json.consequence).toBe("Sem celular");
+    const c2 = await req("POST", `${P}/conduct/allowance/close`, { personId: thais, month: today.slice(0, 7), deductFines: false });
+    expect(c2.status).toBe(201);
+    if (c2.json.payoutCents > 0) {
+      const title = (await req("GET", `${P}/titles/${c2.json.titleId}`)).json;
+      expect(title).toMatchObject({ category: "MESADA", personId: thais, amountCents: c2.json.payoutCents });
+    }
+  });
+
+  it("já recebi: receita avulsa da Thaís entra como receita recebida", async () => {
+    const thais = ((await req("GET", `${P}/people`)).json as { id: string; name: string }[]).find(p => p.name === "Thaís")!.id;
+    const r = await req("POST", `${P}/incomes/quick`, { amountCents: 15000, description: "Escova progressiva", category: "SERVICOS", personId: thais });
+    expect(r.status).toBe(201);
+    expect(r.json).toMatchObject({ kind: "RECEIVABLE", nature: "INCOME", status: "SETTLED", personId: thais });
   });
 });

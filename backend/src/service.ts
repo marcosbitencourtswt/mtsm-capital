@@ -449,7 +449,7 @@ export async function ownerOf(db: Db, table: "title" | "settlement", id: string)
 }
 
 /* ---------- Ranking semanal do que NÃO era obrigatório ---------- */
-export const DEFAULT_MANDATORY = ["MORADIA", "AGUA", "LUZ", "INTERNET", "FIXO", "ALIMENTACAO", "SAUDE", "EDUCACAO", "TRANSPORTE", "DIVIDA", "CARTAO"];
+export const DEFAULT_MANDATORY = ["MORADIA", "AGUA", "LUZ", "INTERNET", "FIXO", "ALIMENTACAO", "SAUDE", "EDUCACAO", "TRANSPORTE", "DIVIDA", "CARTAO", "MESADA"];
 export async function mandatoryCategories(q: Q, e: Entity): Promise<string[]> {
   const r = await q.query("SELECT value FROM setting WHERE entity_code = $1 AND key = 'mandatory_categories'", [e]);
   return (r.rows[0]?.value as string[] | undefined) ?? DEFAULT_MANDATORY;

@@ -262,3 +262,20 @@ button.habit.done .tick { background: var(--success); border-color: var(--succes
 .week-grid > div { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .week-grid small { font-size: 10px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: .06em; }
 .week-grid .dots { gap: 2px; } .week-grid .dots i { width: 7px; height: 7px; border-width: 1px; }
+
+/* ---------- Combinados v2 ---------- */
+.person-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: var(--space-4); }
+.person-tabs button { background: var(--surface); color: var(--ink); border: 1px solid var(--line); flex: none; height: 36px; }
+.person-tabs button.on { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+.habit-wrap { display: flex; flex-direction: column; gap: 4px; }
+button.habit small { font-weight: 500; }
+button.habit:disabled { opacity: .75; cursor: default; }
+.assignees { display: grid; gap: 6px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.assignees label.inline { justify-content: space-between; background: var(--surface-sunken); padding: 6px 8px; border-radius: var(--radius-sm); }
+.stars { color: var(--accent-ink); letter-spacing: 2px; font-size: 18px; }
+.person-head.kid { border-top: 2px solid var(--accent); }
+.bar { height: 6px; background: var(--surface-sunken); border-radius: 999px; overflow: hidden; margin: 6px 0; }
+.bar i { display: block; height: 100%; border-radius: inherit; }
+/* botões de tarefa: texto quebra linha, uma coluna no celular */
+.habit-btns { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+button.habit { height: auto; min-height: 52px; padding: 10px 12px; white-space: normal; text-align: left; line-height: 1.3; }
