@@ -146,7 +146,8 @@ export async function setupNeeded(db: Db): Promise<boolean> {
  * enquanto não houver nenhum usuário: depois disso a rota fica inútil.
  */
 export async function setupFirstAdmin(db: Db, expectedToken: string | undefined, i: { token: string; email: string; name: string; password: string }, userAgent?: string) {
-  if (!expectedToken || expectedToken.length < 16) throw new AppError(403, "SETUP_DISABLED", "Instalação desativada: defina SETUP_TOKEN (16+ caracteres) na Vercel.");
+  if (!expectedToken) throw new AppError(403, "SETUP_DISABLED", "O servidor ainda não recebeu o SETUP_TOKEN. Confira o nome exato na Vercel (Settings → Environment Variables, ambiente Production) e faça Redeploy.");
+  if (expectedToken.length < 16) throw new AppError(403, "SETUP_DISABLED", `O SETUP_TOKEN da Vercel tem ${expectedToken.length} caracteres; use 16 ou mais e faça Redeploy.`);
   const a = Buffer.from(i.token), b = Buffer.from(expectedToken);
   if (a.length !== b.length || !timingSafeEqual(a, b)) throw new AppError(403, "SETUP_TOKEN", "Código de instalação incorreto.");
   validatePassword(i.password);
