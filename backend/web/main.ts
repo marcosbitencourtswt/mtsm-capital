@@ -1,5 +1,6 @@
 import { api, root, ApiError, getEntity, setEntity, type Title, type Recurrence, type Kind, type Settlement, type Person, type Me } from "./api.js";
 import qrcode from "qrcode-generator";
+import { lineChart, hBars, vBars, wireTooltips, chartSlot, paintCharts, resetCharts } from "./charts.js";
 import { money, parseMoney, moneyInput, today, br, monthLabel, addMonths, pct, esc } from "./fmt.js";
 
 /* ===================== Infra de UI ===================== */
@@ -68,10 +69,10 @@ function centsOf(f: FormData, k: string, required = true): number | null {
 }
 
 /* ===================== Roteamento ===================== */
-type Tab = "painel" | "admin" | "bancos" | "combinados" | "pedidos" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
+type Tab = "painel" | "admin" | "bancos" | "combinados" | "pedidos" | "indicadores" | "ranking" | "pagar" | "receber" | "pessoas" | "extrato" | "futuro" | "config";
 let tab: Tab = (location.hash.slice(1) as Tab) || "painel";
-const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, bancos: bancosPage, combinados: combinadosPage, pedidos: pedidosPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
-const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", bancos: "Bancos e dívidas", combinados: "Combinados", pedidos: "Pedidos de compra", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
+const renderers: Record<Tab, () => Promise<string>> = { painel, admin: adminPage, bancos: bancosPage, combinados: combinadosPage, pedidos: pedidosPage, indicadores: indicadoresPage, ranking: rankingPage, pagar: () => titles("PAYABLE"), receber: () => titles("RECEIVABLE"), pessoas, extrato, futuro, config };
+const TITLES: Record<Tab, string> = { painel: "Painel", admin: "Administração", bancos: "Bancos e dívidas", combinados: "Combinados", pedidos: "Pedidos de compra", indicadores: "Indicadores", ranking: "Ranking da semana", pagar: "Contas a pagar", receber: "Contas a receber", pessoas: "Pessoas da casa", extrato: "Extrato", futuro: "Futuro", config: "Ajustes" };
 const side = $("#side"), scrim = $("#scrim");
 const menu = (open: boolean) => { side.classList.toggle("open", open); scrim.classList.toggle("open", open); };
 $("#menu-btn").addEventListener("click", () => menu(true));
@@ -82,11 +83,12 @@ async function render() {
   document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   if (moreBox.querySelector(`[data-tab="${tab}"]`)) setMore(true);
   $("#page-title").textContent = TITLES[tab]; document.title = `${TITLES[tab]} · NOFINANCE`;
-  try { await loadPeople(); view.innerHTML = await renderers[tab](); }
+  try { await loadPeople(); resetCharts(); view.innerHTML = await renderers[tab](); paintCharts(view); }
   catch (e) { view.innerHTML = `<div class="alert danger">${esc(e instanceof ApiError ? e.message : "Sem conexão com a API. Confira se o npm run dev está rodando.")}</div>`; }
 }
 /** "Mais": telas menos usadas ficam recolhidas; abrem sozinhas se a tela atual estiver lá. */
 const moreBtn = $<HTMLButtonElement>("#more-btn"), moreBox = $("#more-tabs");
+wireTooltips(view);
 const setMore = (open: boolean) => { moreBox.hidden = !open; moreBtn.setAttribute("aria-expanded", String(open)); moreBtn.classList.toggle("open", open); };
 moreBtn.addEventListener("click", () => setMore(moreBox.hidden));
 $("#tabs").addEventListener("click", e => {
@@ -785,6 +787,54 @@ let bkStrategy: "juros" | "rapidas" | "nome" = "juros";
 const STRATEGY = { juros: ["Menos juros", "Atrasados e depois os juros mais altos. Economiza mais dinheiro."],
   rapidas: ["Vitórias rápidas", "Menores primeiro. Fecha dívidas rápido e dá fôlego."],
   nome: ["Limpar o nome", "Negativadas e as atrasadas há mais tempo primeiro."] } as const;
+/* ===================== Indicadores (dashboard + relatório) ===================== */
+interface Report { month: string;
+  kpis: { incomeCents: number; expenseCents: number; resultCents: number; savingsRatePct: number | null; debtOwedCents: number; debtPaidCents: number; debtProgressPct: number;
+    debtDueThisMonthCents: number; debtLoadPct: number | null; interestPaidCents: number; savedByEarlyPayCents: number };
+  trend: { month: string; incomeCents: number; expenseCents: number; resultCents: number; amortizationCents: number }[];
+  byCategory: { category: string; cents: number; count: number }[]; byPerson: { name: string; cents: number; count: number }[];
+  topExpenses: { what: string; category: string; cents: number; day: string; who: string | null }[]; }
+let repMonth = today().slice(0, 7);
+const pctTxt = (v: number | null) => (v == null ? "—" : `${v.toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`);
+async function indicadoresPage() {
+  const r = await api<Report>(`/report?month=${repMonth}`), k = r.kpis;
+  const tile = (label: string, value: string, sub = "", cls = "") => `<div class="card kpi"><div class="l">${label}</div><div class="v ${cls}">${value}</div>${sub ? `<div class="muted">${sub}</div>` : ""}</div>`;
+  // Leitura em uma frase: o que o mês diz, sem precisar interpretar gráfico.
+  const verdict = k.incomeCents === 0 && k.expenseCents === 0 ? "Sem lançamentos neste mês ainda."
+    : k.resultCents >= 0 ? `Sobrou ${money(k.resultCents)} (${pctTxt(k.savingsRatePct)} da receita).` : `Faltou ${money(-k.resultCents)}: as despesas passaram a receita.`;
+  const load = k.debtLoadPct == null ? "" : k.debtLoadPct >= 50 ? "neg" : k.debtLoadPct >= 30 ? "warn-txt" : "pos";
+  const months = r.trend.map(t => t.month);
+  return `<div class="row spread rep-head"><h2>Indicadores</h2>
+      <form class="rep-f" id="rep-f"><input type="month" name="m" value="${r.month}" aria-label="Mês"><button class="ghost sm">Ver</button>
+      <button type="button" class="sm" data-print>Gerar relatório (PDF)</button></form></div>
+    <p class="print-only muted">MTSM Capital · ${getEntity() === "personal" ? "Pessoal" : "Byte4Tech (PJ)"} · ${monthLabel(r.month)} · gerado em ${br(today())}</p>
+    <div class="alert ${k.resultCents < 0 ? "danger" : ""}"><b>${monthLabel(r.month)}:</b> ${verdict}</div>
+    <div class="grid kpis-6" role="list">
+      ${tile("Receitas", money(k.incomeCents))}
+      ${tile("Despesas", money(k.expenseCents), k.interestPaidCents ? `inclui ${money(k.interestPaidCents)} de juros` : "")}
+      ${tile("Resultado", money(k.resultCents), "", k.resultCents < 0 ? "neg" : "pos")}
+      ${tile("Taxa de poupança", pctTxt(k.savingsRatePct), "do que entrou, quanto sobrou")}
+      ${tile("Renda comprometida", pctTxt(k.debtLoadPct), `${money(k.debtDueThisMonthCents)} em parcelas e faturas do mês`, load)}
+      ${tile("Dívidas em aberto", money(k.debtOwedCents), `${pctTxt(k.debtProgressPct)} dos empréstimos já quitado${k.savedByEarlyPayCents ? ` · economia ${money(k.savedByEarlyPayCents)}` : ""}`)}
+    </div>
+    <div class="card">${chartSlot(w => lineChart(months, [{ name: "Receitas", cls: "s1", values: r.trend.map(t => t.incomeCents) }, { name: "Despesas", cls: "s2", values: r.trend.map(t => t.expenseCents) }], "Receitas × despesas · 12 meses", w))}
+      <details><summary>Ver em tabela</summary><div class="scroll"><table><tr><th>Mês</th><th>Receitas</th><th>Despesas</th><th>Resultado</th><th>Dívida quitada</th></tr>
+        ${r.trend.map(t => `<tr><td>${monthLabel(t.month)}</td><td>${money(t.incomeCents)}</td><td>${money(t.expenseCents)}</td><td class="${t.resultCents < 0 ? "neg" : "pos"}">${money(t.resultCents)}</td><td>${money(t.amortizationCents)}</td></tr>`).join("")}
+      </table></div></details></div>
+    <div class="grid two">
+      <div class="card">${chartSlot(w => hBars(r.byCategory.map(c => ({ label: catLabel(c.category), cents: c.cents, tip: `${catLabel(c.category)}: ${money(c.cents)} em ${c.count} lançamento(s)` })), `Para onde foi o dinheiro · ${monthLabel(r.month)}`, 8, w))}</div>
+      <div class="card">${chartSlot(w => vBars(months, r.trend.map(t => t.amortizationCents), "Dívida quitada por mês", w))}
+        <p class="muted">Quanto do principal das dívidas foi pago (sem contar juros).</p></div>
+    </div>
+    <div class="grid two">
+      <div class="card"><h3>Gasto por pessoa</h3>${r.byPerson.length ? `<table><tr><th>Pessoa</th><th>Gasto</th><th>Lançamentos</th></tr>
+        ${r.byPerson.map(p => `<tr><td>${esc(p.name)}</td><td>${money(p.cents)}</td><td>${p.count}</td></tr>`).join("")}</table>` : `<p class="muted">Sem gastos no mês.</p>`}</div>
+      <div class="card"><h3>Maiores gastos</h3>${r.topExpenses.length ? `<div class="scroll"><table><tr><th>O quê</th><th>Valor</th><th>Dia</th></tr>
+        ${r.topExpenses.map(x => `<tr><td>${esc(x.what)} <span class="muted">· ${esc(catLabel(x.category))}${x.who ? ` · ${esc(x.who)}` : ""}</span></td><td>${money(x.cents)}</td><td>${br(x.day).slice(0, 5)}</td></tr>`).join("")}</table></div>` : `<p class="muted">Sem gastos no mês.</p>`}</div>
+    </div>
+    <p class="muted">Regime de caixa: conta o que foi pago/recebido no mês. Compra no cartão conta na data da compra. Pagar parcela de empréstimo é quitação (não é despesa); só os juros são despesa.</p>`;
+}
+
 /* ===================== Pedidos de compra ===================== */
 interface PReq { id: string; description: string; amountCents: number; category: string; status: "PENDING" | "APPROVED" | "REJECTED" | "CANCELED"; reviewNote: string | null;
   createdAt: string; reviewedAt: string | null; requestedBy: string; requestedByName: string; forPersonId: string | null; forPersonName: string | null;
@@ -1441,6 +1491,7 @@ view.addEventListener("click", async e => {
       await api(`/requests/${id}/review`, { method: "POST", body: { approve: !!d.reqok, accountId: acc, note } });
       toast(d.reqok ? "Aprovado e lançado." : "Recusado. A pessoa recebe o recado."); await render();
     }
+    else if (d.print !== undefined) window.print();
     else if (d.reqcancel) { await api(`/requests/${d.reqcancel}/cancel`, { method: "POST" }); toast("Pedido cancelado."); await render(); }
     else if (d.reqagain) { const r = (await api<PReq[]>("/requests")).find(x => x.id === d.reqagain); if (r) reqPrefill = { d: r.description, v: r.amountCents, c: r.category }; await render(); scrollTo(0, 0); }
     else if (d.review) { await api("/conduct/checks/review", { method: "POST", body: { personId: d.person, ruleId: d.review, day: d.day, approve: d.val === "true" } }); toast(d.val === "true" ? "Aprovado." : "Recusado: não conta na nota."); await render(); }
@@ -1515,6 +1566,8 @@ view.addEventListener("submit", async e => {
       if (str(f, "from") === str(f, "to")) { toast("Escolha contas diferentes em De e Para.", true); return; }
       await api("/transfers", { method: "POST", body: { fromAccountId: str(f, "from"), toAccountId: str(f, "to"), amountCents: centsOf(f, "v"), day: str(f, "dt") || undefined } });
       toast("Transferência registrada."); await render();
+    } else if (form.id === "rep-f") {
+      repMonth = str(new FormData(form), "m") || repMonth; await render();
     } else if (form.id === "req-f") {
       const f = new FormData(form);
       const body: Record<string, unknown> = { description: str(f, "d"), amountCents: centsOf(f, "v"), category: str(f, "c") || undefined, accountId: str(f, "a") || null };

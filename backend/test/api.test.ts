@@ -1090,3 +1090,17 @@ describe("Segurança extra", () => {
     expect(r.status).toBe(413);
   });
 });
+
+describe("Indicadores", () => {
+  it("fecha as contas do mês: receita, despesa, resultado, categorias e 12 meses de tendência", async () => {
+    const r = (await req("GET", `${P}/report?month=2027-01`)).json;
+    expect(r.trend).toHaveLength(12);
+    expect(r.trend.at(-1).month).toBe("2027-01");
+    const st = (await req("GET", `${P}/statement?from=2027-01&to=2027-01`)).json.months[0];
+    expect(r.kpis).toMatchObject({ incomeCents: st.incomeCents, expenseCents: st.expenseCents, resultCents: st.incomeCents - st.expenseCents });
+    const cats = r.byCategory.reduce((a: number, c: { cents: number }) => a + c.cents, 0);
+    expect(cats).toBeGreaterThan(0);
+    expect(r.byPerson.reduce((a: number, c: { cents: number }) => a + c.cents, 0)).toBe(cats);
+    expect((await req("GET", `${P}/report?month=janeiro`)).status).toBe(400);
+  });
+});

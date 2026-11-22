@@ -52,7 +52,7 @@ try {
   check(bal === 100000 - 1234, "Já gastei desconta da conta escolhida");
 
   // todas as telas abrem sem erro
-  for (const t of ["painel", "pedidos", "combinados", "bancos", "pagar", "receber", "extrato", "ranking", "pessoas", "futuro", "admin", "config"]) {
+  for (const t of ["painel", "pedidos", "combinados", "bancos", "pagar", "receber", "extrato", "indicadores", "ranking", "pessoas", "futuro", "admin", "config"]) {
     await adm.goto(`${U}/#${t}`); await adm.reload();
     // Tela abriu = tem conteúdo e não caiu no aviso de falha da API (o vermelho de "contas vencidas" é legítimo).
     const ok = await adm.waitForFunction(() => { const v = document.getElementById("view")!; return v.children.length > 0 && !/Sem conexão com a API|Erro interno/.test(v.innerText); },

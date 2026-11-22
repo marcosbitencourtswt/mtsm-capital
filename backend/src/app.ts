@@ -10,6 +10,7 @@ import * as push from "./push.js";
 import * as statement from "./statement.js";
 import * as budget from "./budget.js";
 import * as requests from "./requests.js";
+import { report } from "./report.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import { actorStore, type Db } from "./db.js";
@@ -422,6 +423,12 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     for (const x of i.rows) if (x.action === "despesa" && x.category) byMonth.set(x.date.slice(0, 7), [...(byMonth.get(x.date.slice(0, 7)) ?? []), x.category]);
     for (const [m, cats] of byMonth) await budgetAlerts(c.get("entity"), cats, `${m}-28`);
     return c.json(r);
+  });
+  // Dashboard de indicadores (mês em foco + 12 meses de tendência)
+  v1.get("/:entity/report", async c => {
+    const m = c.req.query("month") ?? todaySP().slice(0, 7);
+    if (!isoMonth.safeParse(m).success) throw new AppError(400, "INVALID_PARAM", "month inválido (AAAA-MM).");
+    return c.json(await report(db, c.get("entity"), m, asOf(c)));
   });
   // Pedidos de compra com autorização
   v1.get("/:entity/requests/sources", async c => c.json(await requests.sources(db, c.get("entity"))));
