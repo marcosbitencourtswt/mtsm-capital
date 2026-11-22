@@ -113,7 +113,6 @@ async function painel() {
   const ds = personal ? await api<DebtSummary>("/debts/summary").catch(() => null) : null;
   pendingCache = personal && isGuardian() ? await api<Pending[]>("/conduct/pending").catch(() => []) : [];
   budgetCache = await api<Budget>("/budget").catch(() => null);
-  const ocrOn = (await api<{ enabled: boolean }>("/ocr/status").catch(() => ({ enabled: false }))).enabled;
   const waitingReq = personal && isGuardian() ? (await api<PReq[]>("/requests").catch(() => [] as PReq[])).filter(r => r.status === "PENDING" && r.requestedBy !== me?.id) : [];
   const live = accs.filter(a => a.active);
   const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
@@ -139,7 +138,7 @@ async function painel() {
   ${d.overdue.length ? `<div class="alert danger"><b>${d.overdue.length} conta(s) vencida(s):</b> ${d.overdue.map(t => `${esc(t.counterparty)} ${money(t.openCents)}`).join(" · ")}</div>` : ""}
   ${d.missingValue.length ? `<div class="alert"><b>Sem valor:</b> ${d.missingValue.map(t => `<button class="ghost sm" data-edit="${t.id}">${esc(t.counterparty)}</button>`).join(" ")} <span class="muted">toque para informar</span></div>` : ""}
   <div class="card">
-    <div class="row spread"><h3 style="margin:0">Já gastei</h3>${ocrOn ? `<label class="btnlike sm-like" title="Tire a foto do cupom e o sistema preenche"><input type="file" accept="image/*" capture="environment" data-ocr style="position:absolute;width:1px;height:1px;opacity:0">📷 Ler cupom</label>` : ""}</div>
+    <h3>Já gastei</h3>
     <form class="form" id="quick">
       <div><label>Valor (R$)</label><input name="v" inputmode="decimal" placeholder="0,00" required></div>
       <div><label>O quê</label><input name="d" placeholder="ex.: mercado" required></div>
@@ -1278,30 +1277,6 @@ async function pushOff() {
   toast("Avisos desligados neste aparelho.");
 }
 
-/* ===================== Foto do cupom (OCR) ===================== */
-/** Reduz a foto no próprio aparelho (lado maior 1280 px, JPEG): menos custo e envio rápido no 4G. */
-async function shrinkPhoto(file: File): Promise<string> {
-  const bmp = await createImageBitmap(file);
-  const k = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
-  const cv = document.createElement("canvas"); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
-  cv.getContext("2d")!.drawImage(bmp, 0, 0, cv.width, cv.height);
-  const blob: Blob = await new Promise((ok, no) => cv.toBlob(b => (b ? ok(b) : no(new Error("foto"))), "image/jpeg", 0.82));
-  const buf = new Uint8Array(await blob.arrayBuffer());
-  let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-  return btoa(bin);
-}
-async function readReceipt(file: File) {
-  const form = document.getElementById("quick") as HTMLFormElement | null; if (!form) return;
-  toast("Lendo o cupom…");
-  const image = await shrinkPhoto(file).catch(() => { throw new ApiError(422, "PHOTO", "Não consegui abrir essa foto. Tente tirar de novo."); });
-  const r = await api<{ amountCents: number | null; date: string | null; description: string; category: string; confidence: string }>("/receipt/scan", { method: "POST", body: { image, mediaType: "image/jpeg" } });
-  const set = (n: string, v: string) => { const el = form.querySelector<HTMLInputElement | HTMLSelectElement>(`[name=${n}]`); if (el && v) el.value = v; };
-  if (r.amountCents != null) set("v", moneyInput(r.amountCents));
-  set("d", r.description); set("c", r.category); if (r.date) set("dt", r.date);
-  form.classList.add("ocr-filled"); form.querySelector<HTMLInputElement>("[name=v]")?.focus();
-  toast(r.amountCents == null ? "Li o cupom, mas não o valor. Digite o valor e confira o resto." : r.confidence === "alta" ? "Preenchido. Confira e toque em Registrar." : "Preenchido, mas a foto estava difícil: confira o valor com atenção.", r.confidence !== "alta");
-}
-
 /* ===================== Importar extrato (OFX) ===================== */
 interface StRow { fitid: string; date: string; amountCents: number; memo: string; status: "novo" | "ja_importado" | "ja_lancado";
   action: "despesa" | "receita" | "transferencia" | "ignorar"; category: string; personId: string | null; toAccountId: string | null; hint: string; }
@@ -1572,7 +1547,6 @@ function srcOf(f: FormData): { accountId?: string; cardAccountId?: string } {
 }
 view.addEventListener("change", async e => {
   const t = e.target as HTMLInputElement;
-  if (t.matches("[data-ocr]") && t.files?.[0]) { try { await readReceipt(t.files[0]); } catch (err) { fail(err); } finally { t.value = ""; } return; }
   if (t.matches("[data-ofx]") && t.files?.[0]) { try { await importStatement(t.dataset.ofx!, t.files[0]); } catch (err) { fail(err); } finally { t.value = ""; } return; }
   if (t.matches("[data-importfile]") && t.files?.[0]) { try { await importFile(t.files[0]); } catch (err) { fail(err); } finally { t.value = ""; } }
 });
