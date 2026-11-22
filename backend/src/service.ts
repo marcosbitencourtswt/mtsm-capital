@@ -122,7 +122,7 @@ export async function deleteTitle(db: Db, e: Entity, id: string) {
 }
 
 /* ---------- Baixas (pagamentos/recebimentos) ---------- */
-export interface SettlementInput { amountCents: number; paidOn?: string; method?: "ACCOUNT" | "CARD"; notes?: string | null; createdBy?: string; accountId?: string | null; }
+export interface SettlementInput { amountCents: number; paidOn?: string; method?: "ACCOUNT" | "CARD"; notes?: string | null; createdBy?: string; accountId?: string | null; cardAccountId?: string | null; }
 
 /** Avisos (não bloqueiam): regra 7 (cartão em dívida) e pagamento acima do saldo. */
 export function settlementWarnings(nature: Nature, method: string | undefined, amount: number, open: number): string[] {
@@ -152,10 +152,18 @@ export async function createSettlement(db: Db, e: Entity, titleId: string, i: Se
     t.openCents = i.amountCents;
   }
   // Nada é bloqueado: regras viram avisos gravados.
-  const warnings = settlementWarnings(t.nature, i.method, i.amountCents, t.openCents);
+  // Conta comum paga num cartão cadastrado: vira compra na fatura certa (despesa agora, dinheiro sai quando a fatura for paga).
+  let method = i.method ?? "ACCOUNT", accountId = i.accountId;
+  if (i.cardAccountId) {
+    if (t.kind !== "PAYABLE" || t.nature !== "EXPENSE") throw new AppError(422, "CARD_ONLY_EXPENSE", "Só conta comum pode ir para a fatura do cartão. Dívida paga com cartão vira outra dívida.");
+    const bill = await billFor(db, e, i.cardAccountId, i.paidOn ?? todaySP(), i.amountCents, i.createdBy);
+    await db.query("UPDATE title SET card_bill_id = $1 WHERE id = $2", [bill, titleId]);
+    method = "CARD"; accountId = null;
+  }
+  const warnings = settlementWarnings(t.nature, method, i.amountCents, t.openCents);
   await db.query(
     "INSERT INTO settlement (title_id, amount_cents, paid_on, method, notes, idempotency_key, warnings, created_by, account_id) VALUES ($1,$2,COALESCE($3::date, current_date),$4,$5,$6,$7,$8,$9)",
-    [titleId, i.amountCents, i.paidOn ?? null, i.method ?? "ACCOUNT", i.notes ?? null, idemKey ?? null, warnings, i.createdBy ?? null, await accountOf(db, e, i.accountId)]);
+    [titleId, i.amountCents, i.paidOn ?? null, method, i.notes ?? null, idemKey ?? null, warnings, i.createdBy ?? null, await accountOf(db, e, accountId)]);
   return { duplicate: false, title: await getTitle(db, e, titleId, asOf) };
 }
 
@@ -278,9 +286,13 @@ export async function dashboard(db: Db, e: Entity, asOf = todaySP()) {
 /** Realizado por mês (regime de caixa). */
 export async function statement(db: Db, e: Entity, fromMonth: string, toMonth: string, asOf = todaySP()) {
   const views = new Map((await loadViews(db, e, asOf)).map(t => [t.id, t]));
-  const { rows } = await db.query<{ title_id: string; amount_cents: number; paid_on: string }>(
-    `SELECT s.title_id, s.amount_cents, s.paid_on FROM settlement s JOIN title t ON t.id = s.title_id
+  const { rows } = await db.query<{ title_id: string; amount_cents: number; paid_on: string; method: string }>(
+    `SELECT s.title_id, s.amount_cents, s.paid_on, s.method FROM settlement s JOIN title t ON t.id = s.title_id
      WHERE t.entity_code = $1 AND s.deleted_at IS NULL AND t.deleted_at IS NULL ORDER BY s.paid_on, s.created_at`, [e]);
+  // Compras lançadas uma a uma em cada fatura: essa parte do pagamento da fatura já foi despesa.
+  const itemized = new Map((await db.query<{ bill: string; v: number }>(`SELECT card_bill_id AS bill, sum(amount_cents)::bigint AS v FROM title
+     WHERE entity_code = $1 AND card_bill_id IS NOT NULL AND deleted_at IS NULL GROUP BY card_bill_id`, [e])).rows.map(r => [r.bill, Number(r.v)]));
+  const onBill = new Set((await db.query<{ id: string }>("SELECT id FROM title WHERE entity_code = $1 AND card_bill_id IS NOT NULL", [e])).rows.map(r => r.id));
   const paidBefore = new Map<string, number>();
   const byMonth = new Map<string, Realized>();
   const from = fromMonth.slice(0, 7), to = toMonth.slice(0, 7);
@@ -290,10 +302,14 @@ export async function statement(db: Db, e: Entity, fromMonth: string, toMonth: s
     const m = s.paid_on.slice(0, 7);
     const before = paidBefore.get(t.id) ?? 0;
     paidBefore.set(t.id, before + s.amount_cents);
-    if (m < from) { cashBefore += t.kind === "RECEIVABLE" ? s.amount_cents : -s.amount_cents; continue; }
+    // Só é "via cartão" quando a compra está numa fatura: senão o dinheiro sumiria do caixa sem nunca sair.
+    const viaCard = s.method === "CARD" && t.kind === "PAYABLE" && t.nature === "EXPENSE" && onBill.has(t.id);
+    let already = 0;
+    if (t.nature === "CARD") { already = Math.min(s.amount_cents, itemized.get(t.id) ?? 0); itemized.set(t.id, (itemized.get(t.id) ?? 0) - already); }
+    if (m < from) { if (!viaCard) cashBefore += t.kind === "RECEIVABLE" ? s.amount_cents : -s.amount_cents; continue; }
     if (m > to) continue;
     if (!byMonth.has(m)) byMonth.set(m, emptyRealized());
-    classifySettlement(t, s.amount_cents, before, byMonth.get(m)!);
+    classifySettlement(t, s.amount_cents, before, byMonth.get(m)!, { viaCard, alreadyExpensedCents: already });
   }
   const months: Array<Realized & { month: string; resultCents: number; cashFlowCents: number; cashBalanceCents: number }> = [];
   let bal = cashBefore;
@@ -375,8 +391,40 @@ export async function guard(db: Db, e: Entity, i: { amountCents: number; categor
     lockUntil: s.lockUntil, fixedCeilingCents: s.fixedCeilingCents, fixedSpentInMonthCents: spent.rows[0]!.v });
 }
 
+/** Data de vencimento da fatura em que cai uma compra feita em `date` (considera o dia de fechamento). */
+export function billDueDate(date: string, closingDay: number | null, dueDay: number | null): string {
+  const dayOf = (iso: string) => Number(iso.slice(8, 10));
+  const onOrAfter = (from: string, day: number, strictlyAfter = false) => {
+    let m = from.slice(0, 7);
+    for (let k = 0; k < 3; k++) { const d = dueDateFor(m, day); if (strictlyAfter ? d > from : d >= from) return d; m = addMonths(m, 1).slice(0, 7); }
+    return dueDateFor(m, day);
+  };
+  if (!dueDay) return new Date(new Date(`${date}T12:00:00Z`).getTime() + 30 * 86400000).toISOString().slice(0, 10);
+  if (!closingDay) return onOrAfter(date, dueDay, true);
+  // Comprou no dia do fechamento ou depois: vai para a fatura seguinte.
+  const close = dayOf(date) < closingDay ? dueDateFor(date.slice(0, 7), closingDay) : dueDateFor(addMonths(date.slice(0, 7), 1).slice(0, 7), closingDay);
+  return onOrAfter(close, dueDay, true);
+}
+
+/** Encontra (ou cria "em formação") a fatura do cartão em que a compra cai e soma a compra se a fatura ainda está em formação. */
+async function billFor(c: Q, e: Entity, cardAccountId: string, date: string, amount: number, createdBy?: string): Promise<string> {
+  const a = (await c.query(`SELECT a.type, a.name, a.closing_day, a.due_day, a.owner_person_id, i.name AS inst FROM account a LEFT JOIN institution i ON i.id = a.institution_id
+    WHERE a.id = $1 AND a.entity_code = $2`, [cardAccountId, e])).rows[0];
+  if (!a || a.type !== "CARD") throw new AppError(422, "CARD_NOT_FOUND", "Cartão não encontrado.");
+  const due = billDueDate(date, a.closing_day, a.due_day);
+  const ex = (await c.query(`SELECT id, notes FROM title WHERE account_id = $1 AND nature = 'CARD' AND due_date = $2 AND deleted_at IS NULL LIMIT 1`, [cardAccountId, due])).rows[0];
+  if (ex) {
+    if (ex.notes === "Fatura em formação") await c.query("UPDATE title SET amount_cents = amount_cents + $1 WHERE id = $2", [amount, ex.id]);
+    return ex.id;
+  }
+  const r = await c.query(`INSERT INTO title (entity_code, kind, nature, counterparty, category, amount_cents, due_date, start_date, person_id, account_id, notes, created_by)
+    VALUES ($1,'PAYABLE','CARD',$2,'CARTAO',$3,$4,$5,$6,$7,'Fatura em formação',$8) RETURNING id`,
+    [e, `Fatura ${a.inst ? `${a.inst} · ` : ""}${a.name}`, amount, due, date, a.owner_person_id, cardAccountId, createdBy ?? null]);
+  return r.rows[0].id;
+}
+
 /** "Já gastei": cria a despesa e a baixa juntas. Nunca bloqueia: fora do escopo fica registrado como aviso. */
-export async function quickExpense(db: Db, e: Entity, i: { amountCents: number; category: string; description: string; date?: string; method?: "ACCOUNT" | "CARD"; personId?: string | null; createdBy?: string; accountId?: string | null }) {
+export async function quickExpense(db: Db, e: Entity, i: { amountCents: number; category: string; description: string; date?: string; method?: "ACCOUNT" | "CARD"; personId?: string | null; createdBy?: string; accountId?: string | null; cardAccountId?: string | null }) {
   await assertPerson(db, e, i.personId);
   const g = await guard(db, e, i);
   const date = i.date ?? todaySP();
@@ -385,8 +433,12 @@ export async function quickExpense(db: Db, e: Entity, i: { amountCents: number; 
       `INSERT INTO title (entity_code, kind, nature, counterparty, category, amount_cents, due_date, start_date, notes, person_id, created_by)
        VALUES ($1,'PAYABLE','EXPENSE',$2,$3,$4,$5,$5,$6,$7,$8) RETURNING id`,
       [e, i.description.trim(), i.category, i.amountCents, date, g.allowed ? "Dentro do escopo" : `FORA do escopo: ${g.message}`, i.personId ?? null, i.createdBy ?? null]);
+    // No cartão: a compra é despesa hoje e entra na fatura; o dinheiro sai quando a fatura for paga.
+    const viaCard = !!i.cardAccountId;
+    if (viaCard) await c.query("UPDATE title SET card_bill_id = $1 WHERE id = $2", [await billFor(c, e, i.cardAccountId!, date, i.amountCents, i.createdBy), t.rows[0]!.id]);
     await c.query("INSERT INTO settlement (title_id, amount_cents, paid_on, method, warnings, created_by, account_id) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-      [t.rows[0]!.id, i.amountCents, date, i.method ?? "ACCOUNT", g.allowed ? [] : [`GUARDIAO_${g.rule}: ${g.message}`], i.createdBy ?? null, await accountOf(c, e, i.accountId)]);
+      [t.rows[0]!.id, i.amountCents, date, viaCard ? "CARD" : i.method ?? "ACCOUNT", g.allowed ? [] : [`GUARDIAO_${g.rule}: ${g.message}`], i.createdBy ?? null,
+       viaCard ? null : await accountOf(c, e, i.accountId)]);
     return { guard: g, title: await getTitle(c, e, t.rows[0]!.id) };
   });
 }

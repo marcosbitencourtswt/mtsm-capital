@@ -77,13 +77,17 @@ export interface Realized { incomeCents: number; expenseCents: number; interestP
 export function emptyRealized(): Realized { return { incomeCents: 0, expenseCents: 0, interestPaidCents: 0, amortizationCents: 0, loansInCents: 0, cashInCents: 0, cashOutCents: 0 }; }
 
 /** Classifica uma baixa, dado quanto já foi pago antes dela no mesmo título. */
-export function classifySettlement(t: TitleView, amount: number, paidBefore: number, acc: Realized): Realized {
+/**
+ * opts.viaCard: compra paga no cartão — é despesa na data da compra, mas o dinheiro só sai quando a fatura for paga.
+ * opts.alreadyExpensedCents: parte do pagamento de uma fatura que já entrou como despesa (compras lançadas uma a uma).
+ */
+export function classifySettlement(t: TitleView, amount: number, paidBefore: number, acc: Realized, opts: { viaCard?: boolean; alreadyExpensedCents?: number } = {}): Realized {
   if (t.kind === "RECEIVABLE") {
     acc.cashInCents += amount;
     if (t.nature === "LOAN_IN") acc.loansInCents += amount; else acc.incomeCents += amount;
     return acc;
   }
-  acc.cashOutCents += amount;
+  if (!opts.viaCard) acc.cashOutCents += amount;
   if (t.nature === "DEBT") {
     const interestLeft = Math.max(0, t.interestCents - paidBefore);
     const toInterest = Math.min(amount, interestLeft);
@@ -91,7 +95,7 @@ export function classifySettlement(t: TitleView, amount: number, paidBefore: num
     acc.expenseCents += toInterest;
     acc.amortizationCents += amount - toInterest;
   } else {
-    acc.expenseCents += amount;
+    acc.expenseCents += amount - Math.min(amount, opts.alreadyExpensedCents ?? 0);
   }
   return acc;
 }

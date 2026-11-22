@@ -38,19 +38,35 @@ export function validatePassword(pw: string) {
 export interface SessionUser { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; mustChangePassword: boolean; isGuardian: boolean; isRoot: boolean; }
 const USER_COLS = `u.id, u.email, u.name, u.nickname, u.role, u.person_id AS "personId", u.must_change_password AS "mustChangePassword", u.is_guardian AS "isGuardian", u.is_root AS "isRoot"`;
 
-export async function login(db: Db, emailRaw: string, pw: string, userAgent?: string) {
+const IP_MAX_FAILS = 20, IP_WINDOW_MIN = 15;
+/** Limite por endereço de rede: impede tentar muitas senhas (ou travar contas de outros) a partir do mesmo lugar. */
+async function checkIp(db: Db, ip?: string) {
+  if (!ip) return;
+  const r = await db.query(`SELECT count(*)::int AS n FROM login_attempt WHERE ip = $1 AND NOT ok AND at > now() - interval '${IP_WINDOW_MIN} minutes'`, [ip]);
+  if (r.rows[0].n >= IP_MAX_FAILS) throw new AppError(422, "TOO_MANY_ATTEMPTS", `Muitas tentativas deste aparelho. Espere ${IP_WINDOW_MIN} minutos.`);
+}
+async function recordIp(db: Db, ip: string | undefined, ok: boolean) {
+  if (!ip) return;
+  await db.query("INSERT INTO login_attempt (ip, ok) VALUES ($1, $2)", [ip, ok]);
+  if (Math.random() < 0.05) await db.query("DELETE FROM login_attempt WHERE at < now() - interval '1 day'");
+}
+
+export async function login(db: Db, emailRaw: string, pw: string, userAgent?: string, ip?: string) {
   const email = emailRaw.trim().toLowerCase();
+  await checkIp(db, ip);
   const r = await db.query(`SELECT ${USER_COLS}, u.password_hash, u.active, u.failed_attempts, u.locked_until FROM app_user u WHERE u.email = $1`, [email]);
   const u = r.rows[0];
-  if (!u || !u.active) { await verifyPassword(pw, DUMMY); throw new AppError(422, "INVALID_LOGIN", "E-mail ou senha incorretos."); }
+  if (!u || !u.active) { await verifyPassword(pw, DUMMY); await recordIp(db, ip, false); throw new AppError(422, "INVALID_LOGIN", "E-mail ou senha incorretos."); }
   if (u.locked_until && new Date(u.locked_until) > new Date())
     throw new AppError(422, "LOCKED", `Muitas tentativas erradas. Tente de novo em ${LOCK_MINUTES} minutos.`);
   if (!(await verifyPassword(pw, u.password_hash))) {
+    await recordIp(db, ip, false);
     const fails = u.failed_attempts + 1;
     await db.query(`UPDATE app_user SET failed_attempts = $2, locked_until = CASE WHEN $2 >= ${MAX_FAILS} THEN now() + interval '${LOCK_MINUTES} minutes' END WHERE id = $1`, [u.id, fails]);
     throw new AppError(422, "INVALID_LOGIN", fails >= MAX_FAILS ? `Conta bloqueada por ${LOCK_MINUTES} minutos depois de ${MAX_FAILS} tentativas.` : "E-mail ou senha incorretos.");
   }
   await db.query("UPDATE app_user SET failed_attempts = 0, locked_until = NULL, last_login_at = now() WHERE id = $1", [u.id]);
+  await recordIp(db, ip, true);
   const token = randomBytes(32).toString("base64url");
   await db.query(`INSERT INTO user_session (token_hash, user_id, expires_at, user_agent) VALUES ($1, $2, now() + interval '${SESSION_DAYS} days', $3)`,
     [sha256(token), u.id, (userAgent ?? "").slice(0, 200)]);

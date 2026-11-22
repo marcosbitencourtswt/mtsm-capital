@@ -5,17 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>MTSM Capital · NOFINANCE</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="theme-color" content="#102D27">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="MTSM">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="/styles.css">
-  <script>
-    /* Aplica paleta e tema antes de pintar (evita piscar). */
-    try {
-      var p = localStorage.getItem("palette") || "verde", m = localStorage.getItem("mode") || "auto";
-      var dark = m === "dark" || (m === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
-      document.documentElement.dataset.palette = p; document.documentElement.dataset.mode = dark ? "dark" : "light";
-    } catch (e) {}
-  </script>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <section id="login" class="login" aria-labelledby="login-title">

@@ -557,3 +557,53 @@ describe("Bancos, cartões, empréstimos e ordem de pagamento", () => {
     expect((await req("GET", `${P}/payoff-order?strategy=xpto`)).status).toBe(400);
   });
 });
+
+describe("Cartão sem contagem dupla e segurança do login", () => {
+  it("compra no cartão vira despesa na data, cai na fatura certa e o pagamento da fatura não conta de novo", async () => {
+    const thais = ((await req("GET", `${P}/people`)).json as { id: string; name: string }[]).find(p => p.name === "Thaís")!.id;
+    const conta = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta teste", institution: "Banco Z", ownerPersonId: thais, openingBalanceCents: 100000 })).json;
+    const card = (await req("POST", `${P}/accounts`, { type: "CARD", name: "Cartão teste", institution: "Banco Z", ownerPersonId: thais, creditLimitCents: 500000, closingDay: 3, dueDay: 10 })).json;
+    // compras em 2027-01-02 (antes do fechamento dia 3) e 2027-01-05 (depois): faturas de 10/01 e 10/02
+    const buy = (v: number, d: string) => req("POST", `${P}/expenses/quick`, { amountCents: v, category: "LAZER", description: "Compra cartão", date: d, personId: thais, cardAccountId: card.id });
+    expect((await buy(10000, "2027-01-02")).status).toBe(201);
+    await buy(5000, "2027-01-02");
+    await buy(7000, "2027-01-05");
+    const bills = (await req("GET", `${P}/titles?status=open`)).json.filter((t: { counterparty: string }) => t.counterparty === "Fatura Banco Z · Cartão Teste" || t.counterparty === "Fatura Banco Z · Cartão teste");
+    const jan = bills.find((b: { dueDate: string }) => b.dueDate === "2027-01-10"), feb = bills.find((b: { dueDate: string }) => b.dueDate === "2027-02-10");
+    expect(jan.amountCents).toBe(15000); expect(feb.amountCents).toBe(7000);
+    // a compra não tirou dinheiro da conta
+    let acc = (await req("GET", `${P}/accounts`)).json.find((a: { id: string }) => a.id === conta.id);
+    expect(acc.balanceCents).toBe(100000);
+    // fatura oficial de janeiro chega com 16.000 (houve 1.000 de compra não lançada) e é paga pela conta
+    await req("POST", `${P}/accounts/${card.id}/bill`, { amountCents: 16000, dueDate: "2027-01-10" });
+    await req("POST", `${P}/titles/${jan.id}/settlements`, { amountCents: 16000, paidOn: "2027-01-10", accountId: conta.id });
+    acc = (await req("GET", `${P}/accounts`)).json.find((a: { id: string }) => a.id === conta.id);
+    expect(acc.balanceCents).toBe(100000 - 16000);
+    // extrato de jan/27: despesas = 15.000 (compras) + 1.000 (parte da fatura não lançada) — não 31.000
+    const st = (await req("GET", `${P}/statement?from=2027-01&to=2027-01`)).json.months[0];
+    expect(st.expenseCents).toBe(10000 + 5000 + 7000 + 1000);
+    expect(st.cashOutCents).toBe(16000);
+  });
+
+  it("conta comum paga num cartão cadastrado vai para a fatura; cartão sem fatura continua saindo do caixa", async () => {
+    const card = (await req("POST", `${P}/accounts`, { type: "CARD", name: "Cartão dois", institution: "Banco Y", creditLimitCents: 100000, closingDay: 20, dueDay: 28 })).json;
+    const t = (await req("POST", `${P}/titles`, { kind: "PAYABLE", nature: "EXPENSE", counterparty: "Farmácia teste", category: "SAUDE", amountCents: 4000, dueDate: "2027-03-05" })).json;
+    expect((await req("POST", `${P}/titles/${t.id}/settlements`, { amountCents: 4000, paidOn: "2027-03-05", cardAccountId: card.id })).status).toBe(201);
+    const bill = (await req("GET", `${P}/titles?status=open`)).json.find((x: { dueDate: string; counterparty: string }) => x.dueDate === "2027-03-28" && x.counterparty.includes("Banco Y"));
+    expect(bill.amountCents).toBe(4000);
+    const loose = (await req("POST", `${P}/titles`, { kind: "PAYABLE", nature: "EXPENSE", counterparty: "Antiga cartão", category: "OUTROS", amountCents: 900, dueDate: "2027-04-02" })).json;
+    await req("POST", `${P}/titles/${loose.id}/settlements`, { amountCents: 900, paidOn: "2027-04-02", method: "CARD" });
+    const st = (await req("GET", `${P}/statement?from=2027-03&to=2027-04`)).json.months;
+    expect(st[0].cashOutCents).toBe(0); expect(st[0].expenseCents).toBe(4000);
+    expect(st[1].cashOutCents).toBe(900);
+  });
+
+  it("limita tentativas de login por endereço de rede", async () => {
+    const tryLogin = (ip: string) => app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": ip }, body: JSON.stringify({ email: `naoexiste${Math.random()}@x.test`, password: "errada" }) });
+    for (let i = 0; i < 20; i++) await tryLogin("203.0.113.9");
+    const blocked = await tryLogin("203.0.113.9");
+    expect((await blocked.json()).error.code).toBe("TOO_MANY_ATTEMPTS");
+    // outro endereço segue livre
+    expect((await (await tryLogin("198.51.100.7")).json()).error.code).toBe("INVALID_LOGIN");
+  });
+});

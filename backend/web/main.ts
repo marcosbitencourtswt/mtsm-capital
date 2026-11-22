@@ -92,8 +92,14 @@ interface Dashboard {
 }
 async function painel() {
   const personal = getEntity() === "personal";
-  const [d, rk, cb] = await Promise.all([api<Dashboard>("/dashboard"), personal ? api<Ranking>("/ranking") : Promise.resolve(null),
-    personal ? api<Board>("/conduct/board").catch(() => null) : Promise.resolve(null)]);
+  const [d, rk, cb, accs] = await Promise.all([api<Dashboard>("/dashboard"), personal ? api<Ranking>("/ranking") : Promise.resolve(null),
+    personal ? api<Board>("/conduct/board").catch(() => null) : Promise.resolve(null), api<Acc[]>("/accounts").catch(() => [] as Acc[])]);
+  const live = accs.filter(a => a.active);
+  const accLabel = (a: Acc) => `${esc(a.institution ? `${a.institution} · ${a.name}` : a.name)}${a.ownerName ? ` (${esc(a.ownerName)})` : ""}`;
+  const cashOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="acc:${a.id}">${accLabel(a)}</option>`).join("");
+  const cardOpts = live.filter(a => a.type === "CARD").map(a => `<option value="card:${a.id}">Cartão ${accLabel(a)}</option>`).join("");
+  const paidWith = `<div><label>Pago com</label><select name="src"><option value="">Não sei / não informar</option>${cashOpts}${cardOpts}</select></div>`;
+  const cameIn = `<div><label>Entrou em</label><select name="src"><option value="">Não informar</option>${cashOpts}</select></div>`;
   const kpi = (l: string, v: number, cls = "", hero = false) => `<div class="card kpi${hero ? " hero" : ""}"><div class="l">${l}</div><div class="v ${cls}">${money(v)}</div></div>`;
   const m = d.thisMonth;
   return `
@@ -113,6 +119,7 @@ async function painel() {
       <div><label>Categoria</label><select name="c">${catOptions("ALIMENTACAO")}</select></div>
       <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
       ${personSelect()}
+      ${paidWith}
       <div><button>Registrar</button></div>
     </form>
   </div>
@@ -124,6 +131,7 @@ async function painel() {
       <div><label>Tipo</label><select name="c"><option value="SERVICOS">Serviço</option><option value="VENDAS">Venda</option><option value="RENDA">Renda</option><option value="OUTROS">Outros</option></select></div>
       <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
       ${personSelect(me?.personId)}
+      ${cameIn}
       <div><button>Registrar</button></div>
     </form>
   </div>
@@ -181,7 +189,8 @@ function titleItem(t: Title) {
 }
 
 function titleForm(kind: Kind, t?: Title) {
-  const natures = kind === "PAYABLE" ? ["EXPENSE", "DEBT", "CARD"] : ["INCOME", "LOAN_IN"];
+  // Dívidas e faturas de cartão se cadastram em "Bancos e dívidas" (um lugar só). Aqui, só edição das antigas.
+  const natures = kind === "PAYABLE" ? (t ? ["EXPENSE", "DEBT", "CARD"] : ["EXPENSE"]) : ["INCOME", "LOAN_IN"];
   const isNew = !t;
   return `
     <div class="full"><label>${kind === "PAYABLE" ? "Para quem / o quê" : "De quem"}</label><input name="who" required value="${esc(t?.counterparty)}"></div>
@@ -195,6 +204,7 @@ function titleForm(kind: Kind, t?: Title) {
         .map(([v, l]) => `<option value="${v}" ${t?.interestModel === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
     <div data-int><label>Taxa (%)</label><input name="rate" inputmode="decimal" value="${t ? (t.rateBp / 100).toString().replace(".", ",") : "0"}"></div>
     <div class="full"><label>Observação</label><input name="notes" value="${esc(t?.notes)}"></div>
+    ${isNew && kind === "PAYABLE" ? `<p class="muted full">Dívida, empréstimo ou cartão? Cadastre em <b>Bancos e dívidas</b>: lá o sistema gera as parcelas, a fatura e a ordem de pagamento.</p>` : ""}
     ${isNew && kind === "RECEIVABLE" ? `<p class="muted full" data-loan>Empréstimo não é receita: o sistema cria a dívida em "A pagar" com os juros acima.</p>` : ""}`;
 }
 /** Mostra juros só para dívida/empréstimo. */
@@ -248,18 +258,19 @@ async function editTitle(id: string) {
 async function payTitle(id: string) {
   const [t, accs] = await Promise.all([api<Title>(`/titles/${id}`), api<Acc[]>("/accounts").catch(() => [] as Acc[])]);
   const cashAccs = accs.filter(a => a.active && isCashAcc(a.type));
+  const cards = t.kind === "PAYABLE" && t.nature === "EXPENSE" ? accs.filter(a => a.active && a.type === "CARD") : [];
   const key = crypto.randomUUID(); // evita duplicar com duplo toque
   const verb = t.kind === "PAYABLE" ? "Pagar" : "Receber";
   openDialog(`${verb}: ${t.counterparty}`, `
     <div><label>Valor (R$)</label><input name="v" inputmode="decimal" value="${t.openCents > 0 ? moneyInput(t.openCents) : ""}" required></div>
     <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
-    ${t.kind === "PAYABLE" ? `<div class="full"><label>Pago com</label><select name="m"><option value="ACCOUNT">Conta / Pix / dinheiro</option><option value="CARD">Cartão de crédito</option></select></div>` : ""}
+    ${t.kind === "PAYABLE" ? `<div class="full"><label>Pago com</label><select name="m"><option value="ACCOUNT">Conta / Pix / dinheiro</option>${cards.map(a => `<option value="card:${a.id}">Cartão ${esc(a.institution ?? "")} ${esc(a.name)} (${esc(a.ownerName)}) · vai para a fatura</option>`).join("")}</select></div>` : ""}
     <div class="full"><label>${t.kind === "PAYABLE" ? "Saiu de qual conta" : "Entrou em qual conta"} (opcional)</label><select name="acc"><option value="">Não informar</option>
       ${cashAccs.map(a => `<option value="${a.id}">${esc(a.ownerName)} · ${esc(a.institution ?? "")} ${esc(a.name)}</option>`).join("")}</select></div>
     <div class="full"><label>Observação</label><input name="notes"></div>
     <p class="muted full">Em aberto: ${money(t.openCents)}</p>`, verb, async f => {
     const r = await api<Title>(`/titles/${id}/settlements`, { method: "POST", headers: { "idempotency-key": key },
-      body: { amountCents: centsOf(f, "v"), paidOn: str(f, "dt") || undefined, method: (str(f, "m") || "ACCOUNT"), notes: str(f, "notes") || null, accountId: str(f, "acc") || null } });
+      body: { amountCents: centsOf(f, "v"), paidOn: str(f, "dt") || undefined, ...(str(f, "m").startsWith("card:") ? { cardAccountId: str(f, "m").slice(5) } : { method: "ACCOUNT", accountId: str(f, "acc") || null }), notes: str(f, "notes") || null } });
     const w = r.settlements?.at(-1)?.warnings ?? [];
     toast(w.length ? `Registrado com aviso: ${w.join("; ")}` : "Registrado.", w.length > 0);
   });
@@ -308,7 +319,12 @@ async function extrato() {
 let projMonths = 12;
 let simCache = "";
 async function futuro() {
-  const p = await api<{ startingCashCents: number; months: { month: string; inCents: number; outCents: number; netCents: number; accumulatedCents: number; estimatedItems: number }[] }>(`/projection?months=${projMonths}`);
+  const [p, recs] = await Promise.all([
+    api<{ startingCashCents: number; months: { month: string; inCents: number; outCents: number; netCents: number; accumulatedCents: number; estimatedItems: number }[] }>(`/projection?months=${projMonths}`),
+    api<Recurrence[]>("/recurrences").catch(() => [] as Recurrence[])]);
+  // Sugestão a partir das contas automáticas ativas (nada de valor fixo no código).
+  const sum = (k: Kind) => recs.filter(r => r.active && r.kind === k && r.defaultAmountCents).reduce((a, r) => a + (r.defaultAmountCents ?? 0), 0);
+  const simInc = sum("RECEIVABLE") ? moneyInput(sum("RECEIVABLE")) : "", simFix = sum("PAYABLE") ? moneyInput(sum("PAYABLE")) : "";
   const opt = (n: number) => `<button class="${projMonths === n ? "" : "ghost"} sm" data-proj="${n}">${n >= 12 ? `${n / 12} ano${n > 12 ? "s" : ""}` : `${n} meses`}</button>`;
   return `<h2>Futuro</h2>
   <div class="row" style="margin-bottom:12px">${[6, 12, 24, 36, 60].map(opt).join("")}</div>
@@ -320,8 +336,8 @@ async function futuro() {
   <p class="muted">ESTIMATIVA. Parte do caixa atual (${money(p.startingCashCents)}), soma as contas lançadas e as automáticas pelo último valor conhecido (*). Contas vencidas e sem data entram no mês atual.</p>
   <div class="card"><h3>Em quanto tempo saio das dívidas?</h3>
     <form class="form" id="sim">
-      <div><label>Renda mensal líquida (R$)</label><input name="inc" inputmode="decimal" value="15.599,00" required></div>
-      <div><label>Gastos fixos/mês (R$)</label><input name="fix" inputmode="decimal" value="3.250,00" required></div>
+      <div><label>Renda mensal líquida (R$)</label><input name="inc" inputmode="decimal" placeholder="quanto entra por mês" value="${simInc}" required></div>
+      <div><label>Gastos fixos/mês (R$)</label><input name="fix" inputmode="decimal" placeholder="contas fixas do mês" value="${simFix}" required></div>
       <div><label>Extra/mês (R$)</label><input name="ext" inputmode="decimal" value="0"></div>
       <div><label>Caixa hoje (R$)</label><input name="cash" inputmode="decimal" value="0"></div>
       <div><label class="inline"><input type="checkbox" name="roll" checked> Juros por ciclo se atrasar</label>
@@ -675,7 +691,7 @@ interface Payoff { totalCents: number; unknownRates: number; monthlyInterestCent
   owners: { name: string; openCents: number; monthlyInterestCents: number; overdueCount: number; negativados: number; unknownRates: number; count: number }[];
   items: { titleId: string; name: string; ownerName: string; nature: string; openCents: number; dueDate: string | null; negativado: boolean; monthlyInterestCents: number | null;
   daysOverdue: number; monthlyRateBp: number | null; institution: string | null; reasons: string[] }[]; }
-const ACC_TYPE: Record<AccType, string> = { CHECKING: "Conta / carteira digital", SAVINGS: "Poupança / reserva", INVESTMENT: "Investimento", CARD: "Cartão de crédito", LOAN: "Empréstimo / financiamento", CASH: "Dinheiro em espécie" };
+const ACC_TYPE: Record<AccType, string> = { CHECKING: "Conta / carteira digital", SAVINGS: "Poupança / reserva", INVESTMENT: "Investimento", CARD: "Cartão de crédito", LOAN: "Empréstimo ou dívida (banco, loja ou pessoa)", CASH: "Dinheiro em espécie" };
 const BANKS = ["Nubank", "Inter", "Itaú", "Bradesco", "Banco do Brasil", "Caixa", "Santander", "C6 Bank", "Mercado Pago", "PicPay", "PagBank", "Cora", "Neon", "Will Bank",
   "Banco Pan", "Sicoob", "Sicredi", "BTG", "XP", "Renner (Realize)", "Riachuelo", "C&A", "Magalu", "Casas Bahia", "Americanas", "Carrefour", "Atacadão", "Assaí"];
 const isCashAcc = (t: AccType) => t === "CHECKING" || t === "SAVINGS" || t === "INVESTMENT" || t === "CASH";
@@ -1079,6 +1095,13 @@ view.addEventListener("click", async e => {
     else if (d.togglerec) { await api(`/recurrences/${d.togglerec}`, { method: "PATCH", body: { active: d.active !== "true" } }); await render(); }
   } catch (err) { fail(err); }
 });
+/** "acc:<id>" → conta de onde saiu/entrou; "card:<id>" → compra no cartão (vai para a fatura). */
+function srcOf(f: FormData): { accountId?: string; cardAccountId?: string } {
+  const v = str(f, "src");
+  if (v.startsWith("acc:")) return { accountId: v.slice(4) };
+  if (v.startsWith("card:")) return { cardAccountId: v.slice(5) };
+  return {};
+}
 view.addEventListener("submit", async e => {
   const form = e.target as HTMLFormElement;
   e.preventDefault();
@@ -1086,12 +1109,14 @@ view.addEventListener("submit", async e => {
     if (form.id === "quick") {
       const f = new FormData(form);
       const r = await api<{ guard: { allowed: boolean; message: string } }>("/expenses/quick", { method: "POST", body: {
-        amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null } });
-      toast(r.guard.allowed ? "Gasto registrado." : `Registrado com aviso: ${r.guard.message}`, !r.guard.allowed);
+        amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null, ...srcOf(f) } });
+      const viaCard = str(f, "src").startsWith("card:");
+      toast(r.guard.allowed ? (viaCard ? "Gasto registrado na fatura do cartão." : "Gasto registrado.") : `Registrado com aviso: ${r.guard.message}`, !r.guard.allowed);
       await render();
     } else if (form.id === "quick-in") {
       const f = new FormData(form);
-      await api("/incomes/quick", { method: "POST", body: { amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null } });
+      const src = srcOf(f);
+      await api("/incomes/quick", { method: "POST", body: { amountCents: centsOf(f, "v"), description: str(f, "d"), category: str(f, "c"), date: str(f, "dt") || undefined, personId: str(f, "person") || null, accountId: src.accountId ?? null } });
       toast("Recebimento registrado."); await render();
     } else if (form.id === "ext") {
       const f = new FormData(form); extFrom = str(f, "from") || extFrom; extTo = str(f, "to") || extTo;

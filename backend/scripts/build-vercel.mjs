@@ -28,6 +28,13 @@ writeFileSync(`${OUT}/config.json`, JSON.stringify({
   version: 3,
   routes: [
     { src: "^/api/(.*)$", dest: "/api" },
+    // Cabeçalhos de segurança também nas páginas estáticas (a API já recebe os seus no Hono).
+    { src: "^/(?!api/).*", headers: {
+      "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+      "x-content-type-options": "nosniff", "referrer-policy": "strict-origin-when-cross-origin", "x-frame-options": "DENY",
+      "strict-transport-security": "max-age=31536000; includeSubDomains", "permissions-policy": "camera=(self), microphone=(), geolocation=()" }, continue: true },
+    // O service worker precisa ser revalidado sempre, senão uma versão velha fica presa no celular.
+    { src: "^/(sw\\.js|manifest\\.json)$", headers: { "cache-control": "no-cache" }, continue: true },
     { handle: "filesystem" },
   ],
   crons: [{ path: "/api/v1/cron/recurrences", schedule: "17 9 * * *" }],

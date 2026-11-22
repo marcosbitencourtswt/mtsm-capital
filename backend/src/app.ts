@@ -34,7 +34,7 @@ const titleCreate = z.object({
 const titlePatch = titleCreate.omit({ kind: true, loan: true }).partial().strict();
 const settlementCreate = z.object({
   amountCents: positiveCents, paidOn: isoDate.optional(), method: z.enum(["ACCOUNT", "CARD"]).optional(),
-  notes: z.string().max(500).nullable().optional(), accountId: uuid.nullable().optional(),
+  notes: z.string().max(500).nullable().optional(), accountId: uuid.nullable().optional(), cardAccountId: uuid.nullable().optional(),
 }).strict();
 const settlementPatch = settlementCreate.partial().strict();
 const recurrenceCreate = z.object({
@@ -79,7 +79,8 @@ const transferInput = z.object({ fromAccountId: uuid, toAccountId: uuid, amountC
 const settleInput = z.object({ personId: uuid, kind: z.enum(["PAYMENT", "WAIVER"]), amountCents: positiveCents, note: z.string().trim().max(200).nullable().optional() }).strict();
 const categoriesInput = z.object({ categories: z.array(text(40)).max(40) }).strict();
 const guardInput = z.object({ amountCents: positiveCents, category: text(40), date: isoDate.optional() }).strict();
-const quickInput = guardInput.extend({ description: text(120), method: z.enum(["ACCOUNT", "CARD"]).optional(), personId: personRef, accountId: uuid.nullable().optional() }).strict();
+const quickInput = guardInput.extend({ description: text(120), method: z.enum(["ACCOUNT", "CARD"]).optional(), personId: personRef, accountId: uuid.nullable().optional(),
+  cardAccountId: uuid.nullable().optional() }).strict();
 
 async function body<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T>> {
   let raw: unknown;
@@ -102,7 +103,7 @@ const NO_ENTITY = new Set(["auth", "admin", "cron"]);
 export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: boolean; setupToken?: string } = {}) {
   const app = new Hono<{ Variables: Vars }>();
   app.use("*", secureHeaders({ crossOriginEmbedderPolicy: false, contentSecurityPolicy: {
-    defaultSrc: ["'self'"], scriptSrc: ["'self'", "'unsafe-inline'"], styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+    defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
     fontSrc: ["'self'", "https://fonts.gstatic.com"], imgSrc: ["'self'", "data:"], connectSrc: ["'self'"], frameAncestors: ["'none'"] } }));
 
   app.onError((err, c) => {
@@ -156,7 +157,8 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     secure: opts.secureCookies ?? (c.req.header("x-forwarded-proto") === "https" || c.req.url.startsWith("https:")) });
   v1.post("/auth/login", async c => {
     const i = await body(c, loginInput);
-    const r = await auth.login(db, i.email, i.password, c.req.header("user-agent"));
+    const ip = (c.req.header("x-forwarded-for") ?? c.req.header("x-real-ip") ?? "").split(",")[0]!.trim() || undefined;
+    const r = await auth.login(db, i.email, i.password, c.req.header("user-agent"), ip);
     setCookie(c, COOKIE, r.token, { ...cookieOpts(c), maxAge: auth.SESSION_DAYS * 86400 });
     return c.json(r.user);
   });
@@ -267,7 +269,12 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   });
 
   // Visões
-  v1.get("/:entity/dashboard", async c => c.json(await svc.dashboard(db, c.get("entity"), asOf(c))));
+  v1.get("/:entity/dashboard", async c => {
+    // Garante as contas automáticas do mês atual e do próximo mesmo se a rotina diária falhar (não duplica).
+    const cur = todaySP().slice(0, 7);
+    for (const m of [cur, addMonths(cur, 1).slice(0, 7)]) await svc.generateRecurrences(db, c.get("entity"), m);
+    return c.json(await svc.dashboard(db, c.get("entity"), asOf(c)));
+  });
   v1.get("/:entity/statement", async c => {
     const cur = todaySP().slice(0, 7), from = c.req.query("from") ?? cur, to = c.req.query("to") ?? cur;
     if (!isoMonth.safeParse(from).success || !isoMonth.safeParse(to).success || from > to) throw new AppError(400, "INVALID_PARAM", "from/to inválidos (AAAA-MM).");

@@ -87,6 +87,12 @@ export async function addCardBill(db: Db, e: Entity, u: SessionUser, accountId: 
   const a = (await db.query(`SELECT a.type, a.name, a.owner_person_id, i.name AS inst FROM account a LEFT JOIN institution i ON i.id = a.institution_id
     WHERE a.id = $1 AND a.entity_code = $2`, [accountId, e])).rows[0];
   if (!a || a.type !== "CARD") throw new AppError(404, "CARD_NOT_FOUND", "Cartão não encontrado.");
+  // Já existe fatura com esse vencimento (ex.: em formação pelas compras lançadas): o valor oficial da fatura substitui.
+  const ex = (await db.query(`SELECT id FROM title WHERE account_id = $1 AND nature = 'CARD' AND due_date = $2 AND deleted_at IS NULL LIMIT 1`, [accountId, bill.dueDate])).rows[0];
+  if (ex) {
+    await db.query(`UPDATE title SET amount_cents = $1, notes = 'Fatura informada' WHERE id = $2`, [bill.amountCents, ex.id]);
+    return { id: ex.id as string };
+  }
   const r = await db.query(`INSERT INTO title (entity_code, kind, nature, counterparty, category, amount_cents, due_date, start_date, person_id, account_id, created_by)
     VALUES ($1,'PAYABLE','CARD',$2,'CARTAO',$3,$4,current_date,$5,$6,$7) RETURNING id`,
     [e, `Fatura ${a.inst ? `${a.inst} · ` : ""}${a.name}`, bill.amountCents, bill.dueDate, a.owner_person_id, accountId, u.id]);

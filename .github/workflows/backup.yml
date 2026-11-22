@@ -1,0 +1,48 @@
+# Cópia de segurança diária do banco (Neon) — criptografada antes de sair do runner.
+# Segredos necessários (GitHub → Settings → Secrets and variables → Actions):
+#   NEON_DATABASE_URL  string de conexão do Neon (de preferência um usuário só-leitura)
+#   BACKUP_PASSPHRASE  senha longa para criptografar; guarde fora do GitHub (sem ela o backup não abre)
+# Restaurar:  gpg -d mtsm-AAAA-MM-DD.dump.gpg > mtsm.dump && pg_restore --no-owner -d "<url destino>" mtsm.dump
+name: backup-diario
+on:
+  schedule:
+    - cron: "41 6 * * *"   # 03:41 em Brasília
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verifica segredos
+        env:
+          DB: ${{ secrets.NEON_DATABASE_URL }}
+          PASS: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          if [ -z "$DB" ] || [ -z "$PASS" ]; then echo "::error::Cadastre NEON_DATABASE_URL e BACKUP_PASSPHRASE nos segredos do repositório."; exit 1; fi
+      - name: Instala cliente PostgreSQL 17
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-17
+      - name: Gera e criptografa
+        env:
+          DB: ${{ secrets.NEON_DATABASE_URL }}
+          PASS: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          F="mtsm-$(TZ=America/Sao_Paulo date +%F).dump"
+          /usr/lib/postgresql/17/bin/pg_dump --format=custom --no-owner --no-privileges "$DB" -f "$F"
+          test -s "$F"
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 --symmetric --cipher-algo AES256 -o "$F.gpg" "$F" 3<<<"$PASS"
+          shred -u "$F"
+          echo "ARQ=$F.gpg" >> "$GITHUB_ENV"
+          ls -l "$F.gpg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARQ }}
+          path: ${{ env.ARQ }}
+          retention-days: 30
+          if-no-files-found: error
