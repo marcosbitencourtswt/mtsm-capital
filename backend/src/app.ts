@@ -12,6 +12,7 @@ import * as budget from "./budget.js";
 import * as requests from "./requests.js";
 import * as receipts from "./receipts.js";
 import * as bridge from "./bridge.js";
+import * as backup from "./backup.js";
 import { report } from "./report.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
@@ -295,6 +296,11 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   });
   v1.post("/push/unsubscribe", async c => { await push.unsubscribe(db, c.get("user").id, (await body(c, z.object({ endpoint: z.string().max(1000) }).strict())).endpoint); return c.body(null, 204); });
   v1.post("/push/test", async c => c.json({ sent: await push.notify(db, [c.get("user").id], { title: "MTSM Capital", body: "Avisos ligados neste aparelho. ✓", url: "/", tag: "teste" }) }));
+  v1.get("/admin/backup", async c => {
+    if (!c.get("user").isRoot) throw new AppError(403, "ROOT_ONLY", "Só o root baixa a cópia de segurança.");
+    c.header("cache-control", "no-store");
+    return c.json(await backup.dump(db));
+  });
   v1.get("/admin/worker-tokens", async c => { requireAdmin(c); return c.json(await receipts.listTokens(db)); });
   v1.post("/admin/worker-tokens", async c => {
     const i = await body(c, z.object({ label: z.string().trim().max(60).optional(), days: z.number().int().min(1).max(365).optional() }).strict());

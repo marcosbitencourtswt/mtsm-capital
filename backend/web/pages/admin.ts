@@ -4,6 +4,31 @@ import { root } from "../api.js";
 import { esc, br } from "../fmt.js";
 import { nick } from "./ranking.js";
 import { tokenCard } from "./cupons.js";
+import { encryptBackup } from "../backup-crypto.js";
+
+/** Cópia de segurança sob demanda: dados do servidor, criptografados AQUI no aparelho com a senha digitada. */
+export function backupCard() {
+  return `<div class="card"><h3>Cópia de segurança agora</h3>
+    <p class="muted">Baixa um arquivo criptografado com todos os dados (sem senhas nem chaves). Funciona pelo celular. Guarde o arquivo e a senha em lugares diferentes — sem a senha ele não abre.</p>
+    <div class="row"><button class="sm" data-backup>Baixar cópia criptografada</button></div></div>`;
+}
+export function downloadBackup() {
+  openDialog("Senha da cópia de segurança", `<p class="muted full">Mínimo 12 caracteres. Não fica guardada em lugar nenhum: anote fora do celular.</p>
+    <div class="full"><label>Senha</label><input name="p1" type="password" autocomplete="new-password" minlength="12" required></div>
+    <div class="full"><label>Repita a senha</label><input name="p2" type="password" autocomplete="new-password" minlength="12" required></div>`, "Gerar e baixar", async f => {
+    const p1 = String(f.get("p1") ?? ""), p2 = String(f.get("p2") ?? "");
+    if (p1.length < 12) { toast("A senha precisa de pelo menos 12 caracteres.", true); return false; }
+    if (p1 !== p2) { toast("As senhas não conferem.", true); return false; }
+    toast("Gerando a cópia…");
+    const data = await root<unknown>("/admin/backup");
+    const env = await encryptBackup(JSON.stringify(data), p1);
+    const name = `mtsm-backup-${new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" })}.mtsm`;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(env)], { type: "application/octet-stream" }));
+    const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    toast(`Cópia baixada: ${name}`);
+  });
+}
 
 /* ===================== Usuários (administrador) ===================== */
 export interface UserRow { id: string; email: string; name: string; nickname: string | null; role: "ADMIN" | "MEMBER"; personId: string | null; isGuardian: boolean; isRoot: boolean; active: boolean; mustChangePassword: boolean; lastLoginAt: string | null; totpEnabled?: boolean; conductOnly?: boolean; }
@@ -91,6 +116,6 @@ export async function adminPage() {
     <div class="card">${log.length ? `<ul class="pays">${log.map(l => `<li><span><b>${esc(l.who)}</b> ${esc(l.action)} <b>${esc(l.what.toLowerCase())}</b>${l.label ? `: ${esc(l.label)}` : ""}${l.changed.length ? ` <span class="muted">(${l.changed.slice(0, 5).map(esc).join(", ")})</span>` : ""}</span><span class="muted">${dt(l.at)}</span></li>`).join("")}</ul>` : `<p class="muted">Nada encontrado com esses filtros.</p>`}</div>
     ${isRoot() ? `<form class="form card" id="ret-f"><div><label>Guardar o registro por (meses, 0 = sem limite)</label><input name="m" type="number" min="0" max="600" value="${ret.months}" required></div>
       <div><button class="ghost">Salvar</button></div><p class="muted full">Recomendado: 0 (sem limite). Se limitar, o que sair do banco fica só nas cópias mensais permanentes do backup.</p></form>` : ""}
-    ${isRoot() ? await tokenCard() : ""}
+    ${isRoot() ? backupCard() + await tokenCard() : ""}
     <details class="card"><summary>Versão do banco (${stData.migrations.length} atualizações aplicadas)</summary><ul class="pays">${stData.migrations.map(m => `<li><span>${esc(m.name)}</span><span class="muted">${dt(m.appliedAt)}</span></li>`).join("")}</ul></details>`;
 }

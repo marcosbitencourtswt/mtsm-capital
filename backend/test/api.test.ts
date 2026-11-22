@@ -1213,3 +1213,37 @@ describe("Ponte PJ → PF e impostos da PJ", () => {
     expect((await req("POST", `${B}/bridge`, { kind: "LUCROS", amountCents: 100, fromAccountId: pf.id, toAccountId: pj.id })).json.error.code).toBe("ACCOUNT_NOT_FOUND");
   });
 });
+
+describe("Cópia de segurança sob demanda", () => {
+  it("baixa sem segredos, criptografa, recusa senha errada e restaura igual num banco vazio", async () => {
+    const r = await req("GET", "/api/v1/admin/backup");
+    expect(r.status).toBe(200);
+    const data = r.json as { tables: Record<string, Record<string, unknown>[]> };
+    for (const t of ["user_session", "push_key", "worker_token", "recovery_code", "receipt_inbox"]) expect(data.tables[t]).toBeUndefined();
+    expect(Object.keys(data.tables.app_user![0]!)).not.toContain("password_hash");
+    expect(Object.keys(data.tables.app_user![0]!)).not.toContain("totp_secret");
+    expect(JSON.stringify(data)).not.toMatch(/scrypt\$/); // nenhum hash de senha em lugar nenhum
+
+    const { encryptBackup, decryptBackup } = await import("../web/backup-crypto.js");
+    const env = await encryptBackup(JSON.stringify(data), "frase-de-backup-forte-1");
+    expect(env.data).not.toContain("Marcos");
+    await expect(decryptBackup(env, "senha-errada-123456")).rejects.toThrow("Senha errada");
+
+    const { restore } = await import("../scripts/restore-json.js");
+    const target = "postgres://postgres@127.0.0.1:5432/nofinance_restore_test";
+    const adm = createPool("postgres://postgres@127.0.0.1:5432/postgres");
+    await adm.query("DROP DATABASE IF EXISTS nofinance_restore_test"); await adm.end();
+    const counts = await restore(target, env, "frase-de-backup-forte-1");
+    const back = createPool(target);
+    for (const t of ["title", "settlement", "account", "transfer", "conduct_entry", "audit_log", "person", "app_user"]) {
+      const n = (await back.query(`SELECT count(*)::int AS n FROM "${t}"`)).rows[0].n;
+      expect(n, t).toBe(data.tables[t]!.length);
+      expect(counts[t]).toBe(data.tables[t]!.length);
+    }
+    expect((await back.query("SELECT bool_and(must_change_password) AS ok FROM app_user")).rows[0].ok).toBe(true);
+    // depois de restaurar, gravar continua funcionando (sequências e gatilhos ok)
+    await back.query("INSERT INTO person (entity_code, name) VALUES ('PERSONAL', 'Depois da restauração')");
+    expect((await back.query("SELECT count(*)::int AS n FROM audit_log WHERE new_data->>'name' = 'Depois da restauração'")).rows[0].n).toBe(1);
+    await back.end();
+  });
+});

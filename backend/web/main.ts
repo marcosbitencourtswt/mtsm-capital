@@ -1,5 +1,5 @@
 import { painel } from "./pages/painel.js";
-import { adminPage, newUser, editUser, resetUser } from "./pages/admin.js";
+import { adminPage, newUser, editUser, resetUser, downloadBackup } from "./pages/admin.js";
 import { bancosPage, newAccount, editAccount, billDialog, editTransfer, transferDialog } from "./pages/bancos.js";
 import { combinadosPage, infractionDialog, blameDialog, planDialog, closeDialog, settleDialog, editRule } from "./pages/combinados.js";
 import { pedidosPage, type PReq } from "./pages/pedidos.js";
@@ -199,6 +199,7 @@ view.addEventListener("click", async e => {
     }
     else if (d.print !== undefined) window.print();
     else if (d.rcdel) { if (confirm("Descartar este cupom? Ele não será lido.")) { await api(`/receipts/${d.rcdel}/discard`, { method: "POST" }); toast("Cupom descartado."); await render(); } }
+    else if (d.backup !== undefined) downloadBackup();
     else if (d.toknew !== undefined) {
       const t = await root<{ token: string; expiresAt: string }>("/admin/worker-tokens", { method: "POST", body: { label: "Leitor de cupons (Claude)", days: 90 } });
       openDialog("Chave criada — aparece só agora", `<p class="full">Quando o Claude pedir, cole esta chave no <b>formulário seguro</b> que aparece na conversa (nunca no chat). Ela vence em ${br(t.expiresAt.slice(0, 10))}.</p>
