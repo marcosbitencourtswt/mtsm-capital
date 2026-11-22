@@ -168,9 +168,26 @@ async function newRecoveryCodes(db: Db, userId: string) {
   for (const c of codes) await db.query("INSERT INTO recovery_code (user_id, code_hash) VALUES ($1, $2)", [userId, sha256(normRecovery(c))]);
   return codes;
 }
+/**
+ * Confere a senha de quem já está logado (trocar senha, desligar 2FA). Erros contam como tentativa de login:
+ * 5 erros bloqueiam a conta por 15 min e derrubam as sessões — celular emprestado/roubado não vira "chute de senha".
+ */
+async function confirmPassword(db: Db, userId: string, password: string, msg: string) {
+  const r = (await db.query("SELECT password_hash, failed_attempts, locked_until FROM app_user WHERE id = $1", [userId])).rows[0];
+  if (!r) throw new AppError(422, "INVALID_LOGIN", msg);
+  if (r.locked_until && new Date(r.locked_until) > new Date()) throw new AppError(422, "LOCKED", `Muitas tentativas erradas. Tente de novo em ${LOCK_MINUTES} minutos.`);
+  if (await verifyPassword(password, r.password_hash)) { if (r.failed_attempts) await db.query("UPDATE app_user SET failed_attempts = 0 WHERE id = $1", [userId]); return; }
+  const fails = r.failed_attempts + 1;
+  await db.query(`UPDATE app_user SET failed_attempts = $2, locked_until = CASE WHEN $2 >= ${MAX_FAILS} THEN now() + interval '${LOCK_MINUTES} minutes' END WHERE id = $1`, [userId, fails]);
+  if (fails >= MAX_FAILS) {
+    await db.query("DELETE FROM user_session WHERE user_id = $1", [userId]);
+    throw new AppError(422, "LOCKED", `Senha errada ${MAX_FAILS} vezes: conta bloqueada por ${LOCK_MINUTES} minutos e aparelhos desconectados.`);
+  }
+  throw new AppError(422, "INVALID_LOGIN", msg);
+}
+
 export async function totpDisable(db: Db, userId: string, password: string) {
-  const r = await db.query("SELECT password_hash FROM app_user WHERE id = $1", [userId]);
-  if (!(await verifyPassword(password, r.rows[0].password_hash))) throw new AppError(422, "INVALID_LOGIN", "Senha incorreta.");
+  await confirmPassword(db, userId, password, "Senha incorreta.");
   await clearTotp(db, userId);
 }
 async function clearTotp(db: Db, userId: string) {
@@ -202,8 +219,7 @@ export async function logout(db: Db, token: string | undefined) {
 
 export async function changePassword(db: Db, userId: string, current: string, next: string, keepToken?: string) {
   validatePassword(next);
-  const r = await db.query("SELECT password_hash FROM app_user WHERE id = $1", [userId]);
-  if (!r.rowCount || !(await verifyPassword(current, r.rows[0].password_hash))) throw new AppError(422, "INVALID_LOGIN", "Senha atual incorreta.");
+  await confirmPassword(db, userId, current, "Senha atual incorreta.");
   await db.query("UPDATE app_user SET password_hash = $2, must_change_password = false WHERE id = $1", [userId, await hashPassword(next)]);
   // Encerra as outras sessões (ex.: celular perdido), mantém a atual.
   await db.query("DELETE FROM user_session WHERE user_id = $1 AND token_hash <> $2", [userId, keepToken ? sha256(keepToken) : ""]);

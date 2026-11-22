@@ -1,3 +1,4 @@
+import { bodyLimit } from "hono/body-limit";
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { secureHeaders } from "hono/secure-headers";
@@ -123,6 +124,8 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
       } catch { /* aviso de erro nunca gera outro erro */ }
     })();
   };
+  // Nada maior que 4 MB chega às rotas (extrato OFX de um mês fica bem abaixo disso).
+  app.use("/api/*", bodyLimit({ maxSize: 4 * 1024 * 1024, onError: c => c.json({ error: { code: "TOO_LARGE", message: "Envio grande demais (máx. 4 MB)." } }, 413) }));
   app.onError((err, c) => {
     if (err instanceof AppError) return c.json({ error: { code: err.code, message: err.message, details: err.details } }, err.status);
     const mapped = svc.pgToAppError(err);

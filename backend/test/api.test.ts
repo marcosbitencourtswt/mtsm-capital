@@ -1069,3 +1069,24 @@ describe("Consistência (nada pela metade)", () => {
     expect((await req("POST", `${P}/import/statement`, { accountId: conta.id, rows })).json.receitas).toBe(1);
   });
 });
+
+describe("Segurança extra", () => {
+  it("trocar senha com a senha atual errada 5 vezes bloqueia e derruba as sessões", async () => {
+    await createUser(db, { email: "chute@familia.test", name: "Chute", password: "frase-longa-chute-12" });
+    const r = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "chute@familia.test", password: "frase-longa-chute-12" }) });
+    const ck = (r.headers.get("set-cookie") ?? "").split(";")[0]!;
+    const tryChange = () => req("POST", "/api/v1/auth/password", { current: "errada-123456", next: "outra-frase-longa-1" }, { cookie: ck });
+    for (let i = 0; i < 4; i++) expect((await tryChange()).json.error.code).toBe("INVALID_LOGIN");
+    expect((await tryChange()).json.error.code).toBe("LOCKED");
+    expect((await req("GET", "/api/v1/auth/me", undefined, { cookie: ck })).status).toBe(401); // sessão derrubada
+    // nem a senha certa entra durante o bloqueio
+    const l = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "chute@familia.test", password: "frase-longa-chute-12" }) });
+    expect((await l.json()).error.code).toBe("LOCKED");
+  });
+
+  it("recusa envio maior que 4 MB", async () => {
+    const big = "x".repeat(4 * 1024 * 1024 + 10);
+    const r = await req("POST", `${P}/import/statement/preview`, { accountId: "00000000-0000-0000-0000-000000000000", text: big });
+    expect(r.status).toBe(413);
+  });
+});
