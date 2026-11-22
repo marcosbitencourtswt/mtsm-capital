@@ -7,7 +7,7 @@ import * as admin from "./admin.js";
 import * as accounts from "./accounts.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
-import type { Db } from "./db.js";
+import { actorStore, type Db } from "./db.js";
 import * as svc from "./service.js";
 import { AppError, type Entity } from "./service.js";
 import { todaySP, addMonths } from "./domain/finance.js";
@@ -149,7 +149,8 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     const cur = todaySP().slice(0, 7), out = [];
     for (const e of ["PERSONAL", "BYTE4TECH"] as const) for (const m of [cur, addMonths(cur, 1).slice(0, 7)]) out.push({ entity: e, ...(await svc.generateRecurrences(db, e, m)) });
     await conduct.materializeMisses(db); // faltas de hábito do dia anterior
-    return c.json(out);
+    const pruned = await admin.pruneAudit(db, await admin.getRetention(db)); // retenção do registro de alterações
+    return c.json({ recurrences: out, auditPruned: pruned });
   });
 
   /* ---- Login ---- */
@@ -184,7 +185,7 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     const user = await auth.sessionUser(db, token);
     if (!user) throw new AppError(401, "UNAUTHENTICATED", "Faça login para continuar.");
     c.set("user", user); c.set("token", token!);
-    await next();
+    await actorStore.run(user.id, next); // gravações desta requisição levam o autor para o registro
   });
   const isAdmin = (c: Context<{ Variables: Vars }>) => c.get("user").role === "ADMIN";
   const requireAdmin = (c: Context<{ Variables: Vars }>) => { if (!isAdmin(c)) throw new AppError(403, "ADMIN_ONLY", "Só o administrador pode fazer isso."); };
@@ -210,7 +211,18 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.get("/admin/status", async c => { requireAdmin(c); return c.json(await admin.status(db)); });
   v1.get("/admin/sessions", async c => { requireAdmin(c); return c.json(await admin.listSessions(db, c.get("token"))); });
   v1.delete("/admin/sessions/:id", async c => { requireAdmin(c); await admin.revokeSession(db, param(c, "id", z.string().regex(/^[0-9a-f]{64}$/)), c.get("user")); return c.body(null, 204); });
-  v1.get("/admin/audit", async c => { requireAdmin(c); return c.json(await admin.audit(db, Math.min(200, Number(c.req.query("limit") ?? 50) || 50))); });
+  v1.get("/admin/audit", async c => {
+    requireAdmin(c);
+    const q = (k: string) => c.req.query(k) || undefined, iso = (v?: string) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
+    const actor = q("actor");
+    return c.json(await admin.audit(db, { limit: Math.min(300, Number(q("limit") ?? 50) || 50), area: q("area"), from: iso(q("from")), to: iso(q("to")),
+      actor: actor === "system" || (actor && /^[0-9a-f-]{36}$/i.test(actor)) ? actor : undefined }));
+  });
+  v1.get("/admin/audit/retention", async c => { requireAdmin(c); return c.json({ months: await admin.getRetention(db) }); });
+  v1.put("/admin/audit/retention", async c => {
+    if (!c.get("user").isRoot) throw new AppError(403, "ROOT_ONLY", "Só o root muda a retenção do registro.");
+    return c.json(await admin.setRetention(db, (await body(c, z.object({ months: z.number().int().min(1).max(60) }).strict())).months));
+  });
 
   /* ---- Entidade: Byte4Tech (PJ) só para o administrador ---- */
   v1.use("/:entity/*", async (c, next) => {
@@ -318,6 +330,9 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.post("/:entity/accounts", async c => c.json(await accounts.createAccount(db, c.get("entity"), c.get("user"), await body(c, accountCreate)), 201));
   v1.patch("/:entity/accounts/:id", async c => c.json(await accounts.updateAccount(db, c.get("entity"), param(c, "id"), await body(c, accountPatch))));
   v1.post("/:entity/accounts/:id/bill", async c => c.json(await accounts.addCardBill(db, c.get("entity"), c.get("user"), param(c, "id"), await body(c, billInput)), 201));
+  v1.get("/:entity/transfers", async c => c.json(await accounts.listTransfers(db, c.get("entity"), Math.min(200, Number(c.req.query("limit") ?? 50) || 50))));
+  v1.patch("/:entity/transfers/:id", async c => c.json(await accounts.updateTransfer(db, c.get("entity"), c.get("user"), param(c, "id"), await body(c, transferInput.partial().strict()))));
+  v1.delete("/:entity/transfers/:id", async c => { await accounts.deleteTransfer(db, c.get("entity"), c.get("user"), param(c, "id")); return c.body(null, 204); });
   v1.post("/:entity/transfers", async c => c.json(await accounts.createTransfer(db, c.get("entity"), c.get("user"), await body(c, transferInput)), 201));
   v1.get("/:entity/overview", async c => c.json(await accounts.overview(db, c.get("entity"), asOf(c))));
   v1.get("/:entity/payoff-order", async c => {

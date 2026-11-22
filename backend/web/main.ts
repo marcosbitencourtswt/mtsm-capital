@@ -102,6 +102,7 @@ async function painel() {
   const cardOpts = live.filter(a => a.type === "CARD").map(a => `<option value="card:${a.id}">Cartão ${accLabel(a)}</option>`).join("");
   const paidWith = `<div><label>Pago com</label><select name="src"><option value="">Não sei / não informar</option>${cashOpts}${cardOpts}</select></div>`;
   const cameIn = `<div><label>Entrou em</label><select name="src"><option value="">Não informar</option>${cashOpts}</select></div>`;
+  const trOpts = live.filter(a => isCashAcc(a.type)).map(a => `<option value="${a.id}">${accLabel(a)}</option>`).join("");
   const kpi = (l: string, v: number, cls = "", hero = false) => `<div class="card kpi${hero ? " hero" : ""}"><div class="l">${l}</div><div class="v ${cls}">${money(v)}</div></div>`;
   const m = d.thisMonth;
   return `
@@ -138,6 +139,17 @@ async function painel() {
       <div><button>Registrar</button></div>
     </form>
   </div>
+  ${live.filter(a => isCashAcc(a.type)).length >= 2 ? `<div class="card">
+    <h3>Transferi entre contas</h3>
+    <form class="form" id="quick-tr">
+      <div><label>De</label><select name="from" required>${trOpts}</select></div>
+      <div><label>Para</label><select name="to" required>${trOpts}</select></div>
+      <div><label>Valor (R$)</label><input name="v" inputmode="decimal" placeholder="0,00" required></div>
+      <div><label>Data</label><input name="dt" type="date" value="${today()}"></div>
+      <div><button>Transferir</button></div>
+    </form>
+    <p class="muted">Sai de uma conta e entra na outra num lançamento só. Não é gasto nem receita.</p>
+  </div>` : ""}
   ${m ? `<div class="card"><h3>Este mês (realizado)</h3><div class="grid" style="margin:0">
      <div class="kpi"><div class="l">Receitas</div><div class="v pos">${money(m.incomeCents)}</div></div>
      <div class="kpi"><div class="l">Despesas</div><div class="v">${money(m.expenseCents)}</div></div>
@@ -734,7 +746,9 @@ function debtBoard(d: DebtSummary) {
 
 async function bancosPage() {
   const q = `?strategy=${bkStrategy}${bkOwner ? `&person=${bkOwner}` : ""}`;
-  const [accs, ov, po, ds] = await Promise.all([api<Acc[]>("/accounts"), api<{ people: OwnerRow[] }>("/overview"), api<Payoff>(`/payoff-order${q}`), api<DebtSummary>("/debts/summary")]);
+  const [accs, ov, po, ds, trs] = await Promise.all([api<Acc[]>("/accounts"), api<{ people: OwnerRow[] }>("/overview"), api<Payoff>(`/payoff-order${q}`), api<DebtSummary>("/debts/summary"),
+    api<Transfer[]>("/transfers?limit=20").catch(() => [] as Transfer[])]);
+  trCache = trs;
   const owners = [{ id: "", name: "Todos" }, ...people.filter(p => p.active).map(p => ({ id: p.id, name: p.name })), { id: "none", name: "Dos dois / casa" }];
   const shown = accs.filter(a => a.active && (bkOwner === "" || (bkOwner === "none" ? !a.ownerPersonId : a.ownerPersonId === bkOwner)));
   const card = (o: OwnerRow) => `<div class="card">
@@ -768,6 +782,10 @@ async function bancosPage() {
   ${ov.people.filter(o => bkOwner === "" || (bkOwner === "none" ? o.personId === null : o.personId === bkOwner)).map(card).join("")}
   <h3 style="margin-top:20px">Produtos</h3>
   <div class="list">${shown.map(item).join("") || `<div class="empty">Nada cadastrado ainda. Toque em "+ Adicionar".</div>`}</div>
+  ${trs.length ? `<h3 style="margin-top:20px">Últimas transferências</h3>
+  <div class="card scroll"><table><tr><th>Data</th><th>De</th><th>Para</th><th>Valor</th><th>Quem lançou</th><th></th></tr>
+    ${trs.map(t => `<tr><td>${br(t.day)}</td><td>${esc(t.fromLabel)}</td><td>${esc(t.toLabel)}</td><td>${money(t.amountCents)}</td><td>${esc(t.createdByName ?? "—")}</td>
+      <td>${isAdmin() || t.createdBy === me?.id ? `<button class="ghost sm" data-edittr="${t.id}">Editar</button> <button class="danger sm" data-deltr="${t.id}">Excluir</button>` : ""}</td></tr>`).join("")}</table></div>` : ""}
   <div class="card" style="margin-top:20px"><div class="row spread"><h3 style="margin:0">Por onde começar</h3><span class="muted">total ${money(po.totalCents)} · juros ≈ <b class="neg">${money(po.monthlyInterestCents)}/mês</b></span></div>
     <div class="scroll" style="margin-top:10px"><table><tr><th>De quem</th><th>Deve</th><th>Juros por mês</th><th>Atrasadas</th><th>Negativadas</th></tr>
       ${po.owners.map(o => `<tr><td>${esc(o.name)}</td><td>${money(o.openCents)}</td><td class="${o.monthlyInterestCents ? "neg" : ""}">${money(o.monthlyInterestCents)}${o.unknownRates ? ` <span class="muted">+ ${o.unknownRates} sem taxa</span>` : ""}</td>
@@ -851,6 +869,22 @@ function billDialog(id: string) {
     <div><label>Vencimento</label><input name="d" type="date" required></div>`, "Salvar", async f => {
     await api(`/accounts/${id}/bill`, { method: "POST", body: { amountCents: centsOf(f, "v"), dueDate: str(f, "d") } });
     toast("Fatura lançada em Contas a pagar.");
+  });
+}
+interface Transfer { id: string; amountCents: number; day: string; note: string | null; createdBy: string | null; createdByName: string | null;
+  fromAccountId: string; toAccountId: string; fromLabel: string; toLabel: string; }
+let trCache: Transfer[] = [];
+async function editTransfer(id: string) {
+  const t = trCache.find(x => x.id === id); if (!t) return;
+  const accs = (await api<Acc[]>("/accounts")).filter(a => a.active && isCashAcc(a.type));
+  const opts = (sel: string) => accs.map(a => `<option value="${a.id}" ${a.id === sel ? "selected" : ""}>${esc(a.ownerName)} · ${esc(a.institution ?? "")} ${esc(a.name)}</option>`).join("");
+  openDialog("Corrigir transferência", `<div class="full"><label>De</label><select name="from">${opts(t.fromAccountId)}</select></div>
+    <div class="full"><label>Para</label><select name="to">${opts(t.toAccountId)}</select></div>
+    <div><label>Valor (R$)</label><input name="v" inputmode="decimal" value="${moneyInput(t.amountCents)}" required></div>
+    <div><label>Data</label><input name="d" type="date" value="${t.day}"></div>
+    <p class="muted full">A correção fica no registro de alterações, com o valor de antes e o de agora.</p>`, "Salvar", async f => {
+    await api(`/transfers/${id}`, { method: "PATCH", body: { fromAccountId: str(f, "from"), toAccountId: str(f, "to"), amountCents: centsOf(f, "v"), day: str(f, "d") } });
+    toast("Transferência corrigida. Saldos recalculados.");
   });
 }
 async function transferDialog(fromId: string) {
@@ -982,11 +1016,16 @@ function resetUser(id: string) {
 interface Status { ok: boolean; dbLatencyMs: number; database: { version: string; size: string }; counts: Record<string, number>;
   migrations: { name: string; appliedAt: string }[]; runtime: { node: string; vercel: boolean; region: string | null; commit: string | null }; }
 interface Sess { id: string; name: string; email: string; isRoot: boolean; device: string; lastSeenAt: string; createdAt: string; current: boolean; }
-interface Audit { id: number; at: string; what: string; action: string; label: string; changed: string[]; }
+interface Audit { id: number; at: string; who: string; what: string; action: string; label: string; changed: string[]; }
+let auditQ = { actor: "", area: "", from: "", to: "" };
+const AREAS: [string, string][] = [["", "Tudo"], ["contas", "Contas"], ["pagamentos", "Pagamentos"], ["bancos", "Bancos e dívidas"], ["transferencias", "Transferências"],
+  ["combinados", "Combinados"], ["pessoas", "Pessoas e usuários"], ["ajustes", "Ajustes"]];
 const dt = (iso: string) => new Date(iso).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 async function adminPage() {
   if (!isAdmin()) return `<div class="empty">Área só para administradores.</div>`;
-  const [st, sessions, log] = await Promise.all([root<Status>("/admin/status"), root<Sess[]>("/admin/sessions"), root<Audit[]>("/admin/audit?limit=40")]);
+  const aq = new URLSearchParams(Object.entries({ limit: "60", ...auditQ }).filter(([, v]) => v));
+  const [st, sessions, log, ret] = await Promise.all([root<Status>("/admin/status"), root<Sess[]>("/admin/sessions"), root<Audit[]>(`/admin/audit?${aq}`),
+    root<{ months: number }>("/admin/audit/retention")]);
   const c = st.counts;
   const kpi = (l: string, v: string | number) => `<div class="card kpi"><div class="l">${l}</div><div class="v">${v}</div></div>`;
   return `<div class="alert ${st.ok ? "ok" : "danger"}"><b>${st.ok ? "Sistema funcionando" : "Problema no sistema"}</b> · banco PostgreSQL ${esc(st.database.version)} · ${esc(st.database.size)} · resposta ${st.dbLatencyMs} ms
@@ -999,8 +1038,18 @@ async function adminPage() {
       ${sessions.map(x => `<tr><td>${esc(x.name)}${x.isRoot ? ` <span class="chip NO_VALUE">Root</span>` : ""}</td><td>${esc(x.device)}</td><td>${dt(x.lastSeenAt)}</td><td>${dt(x.createdAt)}</td>
         <td>${x.current ? `<span class="chip SETTLED">este aparelho</span>` : !x.isRoot || isRoot() ? `<button class="danger sm" data-endsess="${x.id}">Encerrar</button>` : ""}</td></tr>`).join("")}</table></div>
     <h2 style="margin-top:24px">Registro de alterações</h2>
-    <p class="muted">As últimas 40 mudanças no sistema. O histórico completo fica guardado no banco.</p>
-    <div class="card"><ul class="pays">${log.map(l => `<li><span><b>${esc(l.what)}</b> ${esc(l.action)}${l.label ? `: ${esc(l.label)}` : ""}${l.changed.length ? ` <span class="muted">(${l.changed.slice(0, 4).map(esc).join(", ")})</span>` : ""}</span><span class="muted">${dt(l.at)}</span></li>`).join("")}</ul></div>
+    <p class="muted">Toda criação, correção e exclusão, com quem fez e quando. Guardado por ${ret.months} ${ret.months === 1 ? "mês" : "meses"} no banco; as cópias diárias ficam no backup.</p>
+    <form class="form card" id="audit-f">
+      <div><label>Quem</label><select name="actor"><option value="">Todos</option>${usersCache.map(u => `<option value="${u.id}" ${auditQ.actor === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
+        <option value="system" ${auditQ.actor === "system" ? "selected" : ""}>Sistema (automático)</option></select></div>
+      <div><label>O quê</label><select name="area">${AREAS.map(([v, l]) => `<option value="${v}" ${auditQ.area === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div><label>De</label><input name="from" type="date" value="${auditQ.from}"></div>
+      <div><label>Até</label><input name="to" type="date" value="${auditQ.to}"></div>
+      <div><button>Filtrar</button></div>
+    </form>
+    <div class="card">${log.length ? `<ul class="pays">${log.map(l => `<li><span><b>${esc(l.who)}</b> ${esc(l.action)} <b>${esc(l.what.toLowerCase())}</b>${l.label ? `: ${esc(l.label)}` : ""}${l.changed.length ? ` <span class="muted">(${l.changed.slice(0, 5).map(esc).join(", ")})</span>` : ""}</span><span class="muted">${dt(l.at)}</span></li>`).join("")}</ul>` : `<p class="muted">Nada encontrado com esses filtros.</p>`}</div>
+    ${isRoot() ? `<form class="form card" id="ret-f"><div><label>Guardar o registro por (meses)</label><input name="m" type="number" min="1" max="60" value="${ret.months}" required></div>
+      <div><button class="ghost">Salvar</button></div><p class="muted full">Registros mais antigos saem do banco no ciclo diário. Atenção: o backup guarda só os últimos 30 dias, então o que sair do banco depois disso não tem volta.</p></form>` : ""}
     <details class="card"><summary>Versão do banco (${st.migrations.length} atualizações aplicadas)</summary><ul class="pays">${st.migrations.map(m => `<li><span>${esc(m.name)}</span><span class="muted">${dt(m.appliedAt)}</span></li>`).join("")}</ul></details>`;
 }
 
@@ -1145,6 +1194,8 @@ view.addEventListener("click", async e => {
     else if (d.newacc !== undefined) newAccount();
     else if (d.editacc) await editAccount(d.editacc);
     else if (d.bill) billDialog(d.bill);
+    else if (d.edittr) await editTransfer(d.edittr);
+    else if (d.deltr) { if (confirm("Excluir esta transferência? Os saldos das duas contas voltam ao que eram. Fica no registro de alterações.")) { await api(`/transfers/${d.deltr}`, { method: "DELETE" }); toast("Transferência excluída."); await render(); } }
     else if (d.transfer) await transferDialog(d.transfer);
     else if (d.bkowner !== undefined) { bkOwner = d.bkowner; await render(); }
     else if (d.strategy) { bkStrategy = d.strategy as typeof bkStrategy; await render(); }
@@ -1194,6 +1245,16 @@ view.addEventListener("submit", async e => {
       const viaCard = str(f, "src").startsWith("card:");
       toast(r.guard.allowed ? (viaCard ? "Gasto registrado na fatura do cartão." : "Gasto registrado.") : `Registrado com aviso: ${r.guard.message}`, !r.guard.allowed);
       await render();
+    } else if (form.id === "quick-tr") {
+      const f = new FormData(form);
+      if (str(f, "from") === str(f, "to")) { toast("Escolha contas diferentes em De e Para.", true); return; }
+      await api("/transfers", { method: "POST", body: { fromAccountId: str(f, "from"), toAccountId: str(f, "to"), amountCents: centsOf(f, "v"), day: str(f, "dt") || undefined } });
+      toast("Transferência registrada."); await render();
+    } else if (form.id === "audit-f") {
+      const f = new FormData(form); auditQ = { actor: str(f, "actor"), area: str(f, "area"), from: str(f, "from"), to: str(f, "to") }; await render();
+    } else if (form.id === "ret-f") {
+      const months = Number(str(new FormData(form), "m"));
+      await root("/admin/audit/retention", { method: "PUT", body: { months } }); toast(`Registro guardado por ${months} ${months === 1 ? "mês" : "meses"}.`); await render();
     } else if (form.id === "quick-in") {
       const f = new FormData(form);
       const src = srcOf(f);

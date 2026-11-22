@@ -674,3 +674,44 @@ describe("Painel de dívidas", () => {
     expect(s.total.owedCents).toBe(s.owners.reduce((a: number, o: { owedCents: number }) => a + o.owedCents, 0));
   });
 });
+
+describe("Registro de alterações e transferências", () => {
+  it("grava quem alterou, filtra, corrige/exclui transferência com saldo voltando e respeita a retenção", async () => {
+    const me = (await req("GET", "/api/v1/auth/me")).json;
+    const a = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Origem log", institution: "Banco L", openingBalanceCents: 100000 })).json;
+    const b = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Destino log", institution: "Banco L", openingBalanceCents: 0 })).json;
+    const bal = async (id: string) => (await req("GET", `${P}/accounts`)).json.find((x: { id: string }) => x.id === id).balanceCents;
+    const tr = (await req("POST", `${P}/transfers`, { fromAccountId: a.id, toAccountId: b.id, amountCents: 50000 })).json;
+    expect([await bal(a.id), await bal(b.id)]).toEqual([50000, 50000]);
+    expect((await req("PATCH", `${P}/transfers/${tr.id}`, { amountCents: 30000 })).status).toBe(200);
+    expect([await bal(a.id), await bal(b.id)]).toEqual([70000, 30000]);
+    const list = (await req("GET", `${P}/transfers`)).json;
+    expect(list.find((x: { id: string }) => x.id === tr.id)).toMatchObject({ amountCents: 30000, createdByName: "Marcos" });
+
+    // autor gravado e filtros funcionando
+    const log = (await req("GET", `/api/v1/admin/audit?area=transferencias&actor=${me.id}&limit=10`)).json;
+    expect(log[0]).toMatchObject({ who: "Marcos", action: "alterou", what: "Transferência" });
+    expect(log[0].label.replace(/\s/g, " ")).toBe("R$ 500,00 → R$ 300,00");
+    expect((await req("GET", `/api/v1/admin/audit?area=transferencias&actor=system&limit=10`)).json.find((l: { label: string }) => l.label.includes("300,00"))).toBeUndefined();
+
+    // membro não exclui transferência de outra pessoa
+    await createUser(db, { email: "membro-log@familia.test", name: "Membro Log", password: "frase-longa-membro-1" });
+    const ml = await app.request("/api/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "membro-log@familia.test", password: "frase-longa-membro-1" }) });
+    const mck = (ml.headers.get("set-cookie") ?? "").split(";")[0]!;
+    expect((await req("DELETE", `${P}/transfers/${tr.id}`, undefined, { cookie: mck })).status).toBe(403);
+
+    expect((await req("DELETE", `${P}/transfers/${tr.id}`)).status).toBe(204);
+    expect([await bal(a.id), await bal(b.id)]).toEqual([100000, 0]);
+    expect((await req("GET", `/api/v1/admin/audit?area=transferencias&limit=5`)).json[0]).toMatchObject({ who: "Marcos", action: "excluiu" });
+
+    // retenção: padrão 12 meses; só o root muda; o ciclo diário tira o que passou do prazo
+    expect((await req("GET", "/api/v1/admin/audit/retention")).json.months).toBe(12);
+    await db.query("UPDATE app_user SET is_root = true WHERE email = 'admin@familia.test'");
+    expect((await req("PUT", "/api/v1/admin/audit/retention", { months: 2 })).json.months).toBe(2);
+    await db.query("INSERT INTO audit_log (table_name, row_id, action, at) VALUES ('title', 'velho', 'INSERT', now() - interval '3 months')");
+    const cron = await app.request("/api/v1/cron/recurrences", { headers: { authorization: "Bearer segredo-cron" } });
+    expect((await cron.json()).auditPruned).toBeGreaterThanOrEqual(1);
+    expect((await db.query("SELECT count(*)::int AS n FROM audit_log WHERE row_id = 'velho'")).rows[0].n).toBe(0);
+    await db.query("UPDATE app_user SET is_root = false WHERE email = 'admin@familia.test'");
+  });
+});

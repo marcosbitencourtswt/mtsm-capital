@@ -263,3 +263,36 @@ export async function debtSummary(db: Db, e: Entity, asOf = todaySP()) {
   total.progressPct = pct(total);
   return { asOf, owners, total };
 }
+
+/* ---------- Transferências: lista, correção e exclusão (fica no registro de alterações) ---------- */
+export async function listTransfers(db: Db, e: Entity, limit = 50) {
+  return (await db.query(`SELECT x.id, x.amount_cents AS "amountCents", x.day::text AS day, x.note, x.created_by AS "createdBy",
+      x.from_account_id AS "fromAccountId", x.to_account_id AS "toAccountId",
+      concat_ws(' · ', pf.name, fi.name, f.name) AS "fromLabel", concat_ws(' · ', pt.name, ti.name, t.name) AS "toLabel", u.name AS "createdByName"
+    FROM transfer x JOIN account f ON f.id = x.from_account_id JOIN account t ON t.id = x.to_account_id
+    LEFT JOIN institution fi ON fi.id = f.institution_id LEFT JOIN institution ti ON ti.id = t.institution_id
+    LEFT JOIN person pf ON pf.id = f.owner_person_id LEFT JOIN person pt ON pt.id = t.owner_person_id
+    LEFT JOIN app_user u ON u.id = x.created_by
+    WHERE x.deleted_at IS NULL AND f.entity_code = $1 ORDER BY x.day DESC, x.created_at DESC LIMIT $2`, [e, limit])).rows;
+}
+async function transferOf(db: Db, e: Entity, id: string, u: SessionUser) {
+  const r = (await db.query(`SELECT x.created_by FROM transfer x JOIN account a ON a.id = x.from_account_id
+    WHERE x.id = $1 AND a.entity_code = $2 AND x.deleted_at IS NULL`, [id, e])).rows[0];
+  if (!r) throw new AppError(404, "TRANSFER_NOT_FOUND", "Transferência não encontrada.");
+  if (u.role !== "ADMIN" && r.created_by !== u.id) throw new AppError(403, "NOT_OWNER", "Você só pode alterar o que você lançou.");
+}
+export async function updateTransfer(db: Db, e: Entity, u: SessionUser, id: string, p: { fromAccountId?: string; toAccountId?: string; amountCents?: number; day?: string; note?: string | null }) {
+  await transferOf(db, e, id, u);
+  const cur = (await db.query("SELECT from_account_id, to_account_id FROM transfer WHERE id = $1", [id])).rows[0];
+  const from = p.fromAccountId ?? cur.from_account_id, to = p.toAccountId ?? cur.to_account_id;
+  if (from === to) throw new AppError(422, "INVALID_ACCOUNTS", "Origem e destino precisam ser contas diferentes.");
+  const ok = await db.query("SELECT count(*)::int AS n FROM account WHERE id = ANY($1) AND entity_code = $2 AND type IN ('CHECKING','SAVINGS','INVESTMENT','CASH')", [[from, to], e]);
+  if (ok.rows[0].n !== 2) throw new AppError(422, "INVALID_ACCOUNTS", "Transferência só entre contas, poupança, investimento ou dinheiro.");
+  await db.query(`UPDATE transfer SET from_account_id = $2, to_account_id = $3, amount_cents = COALESCE($4, amount_cents), day = COALESCE($5::date, day),
+    note = CASE WHEN $6 THEN $7 ELSE note END WHERE id = $1`, [id, from, to, p.amountCents ?? null, p.day ?? null, p.note !== undefined, p.note?.trim() || null]);
+  return { id };
+}
+export async function deleteTransfer(db: Db, e: Entity, u: SessionUser, id: string) {
+  await transferOf(db, e, id, u);
+  await db.query("UPDATE transfer SET deleted_at = now() WHERE id = $1", [id]);
+}
