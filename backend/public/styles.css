@@ -310,3 +310,7 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
 .habit.wait { border-style: dashed; border-color: var(--warning); background: var(--warning-soft); }
 .dots i.wait { background: var(--warning); opacity: .6; }
 .pending-card { border-top: 2px solid var(--warning); }
+.btnlike.sm-like { height: 32px; padding: 0 var(--space-3); font-size: 13px; position: relative; }
+.st-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 4px; }
+.st-grid select { min-width: 0; height: 36px; font-size: 13px; }
+@media (min-width: 700px) { .st-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }

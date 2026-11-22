@@ -863,3 +863,63 @@ describe("Avisos no celular", () => {
     expect(sent.some(s => s.endpoint.endsWith("/crianca"))).toBe(false);
   });
 });
+
+describe("Importar extrato OFX", () => {
+  it("lê OFX 1.x e 2.x, vírgula decimal e cartão", async () => {
+    const { parseOfx } = await import("../src/statement.js");
+    const sgml = `OFXHEADER:100\nCHARSET:1252\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><BANKTRANLIST>
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20261103120000[-3:BRT]<TRNAMT>-45,90<FITID>A1<MEMO>IFOOD *Restaurante
+<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20261105<TRNAMT>1500.00<FITID>A2<NAME>PIX RECEBIDO<MEMO>Cliente
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`;
+    const a = parseOfx(sgml);
+    expect(a.isCard).toBe(false);
+    expect(a.txns).toEqual([
+      { fitid: "A1", date: "2026-11-03", amountCents: -4590, memo: "IFOOD *Restaurante" },
+      { fitid: "A2", date: "2026-11-05", amountCents: 150000, memo: "PIX RECEBIDO · Cliente" },
+    ]);
+    const xml = `<?xml version="1.0"?><OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>20261110</DTPOSTED><TRNAMT>-12.34</TRNAMT><FITID>X9</FITID><MEMO>Uber *Trip</MEMO></STMTTRN></BANKTRANLIST></CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>`;
+    const b = parseOfx(xml);
+    expect(b.isCard).toBe(true);
+    expect(b.txns[0]).toMatchObject({ fitid: "X9", amountCents: -1234, memo: "Uber *Trip" });
+  });
+
+  it("classifica, reconhece o já lançado e a transferência com a família, não duplica e aprende a categoria", async () => {
+    const d = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+    const ymd = d.replace(/-/g, "");
+    const ppl = (await req("GET", `${P}/people`)).json as { id: string; name: string }[];
+    const marcos = ppl.find(p => p.name === "Marcos")!.id;
+    const ofxPerson = (await req("POST", `${P}/people`, { name: "Joana Extrato" })).json.id;
+    const minha = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta OFX", institution: "Banco OFX", ownerPersonId: marcos, openingBalanceCents: 500000 })).json;
+    const dela = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta da Joana", institution: "Banco J", ownerPersonId: ofxPerson, openingBalanceCents: 0 })).json;
+    // lançado à mão antes de importar
+    await req("POST", `${P}/expenses/quick`, { amountCents: 8000, description: "Padaria do bairro", category: "ALIMENTACAO", date: d, accountId: minha.id, personId: marcos });
+    const ofx = `<OFX><BANKTRANLIST>
+<STMTTRN><DTPOSTED>${ymd}<TRNAMT>-80.00<FITID>F1<MEMO>PADARIA BOM PAO
+<STMTTRN><DTPOSTED>${ymd}<TRNAMT>-59.90<FITID>F2<MEMO>NETFLIX.COM
+<STMTTRN><DTPOSTED>${ymd}<TRNAMT>-300.00<FITID>F3<MEMO>PIX ENVIADO JOANA SILVA
+<STMTTRN><DTPOSTED>${ymd}<TRNAMT>-77.77<FITID>F4<MEMO>LOJA QUALQUER 123
+</BANKTRANLIST></OFX>`;
+    const pre = (await req("POST", `${P}/import/statement/preview`, { accountId: minha.id, text: ofx })).json;
+    const by = (id: string) => pre.rows.find((r: { fitid: string }) => r.fitid === id);
+    expect(by("F1")).toMatchObject({ status: "ja_lancado", action: "ignorar" });
+    expect(by("F2")).toMatchObject({ status: "novo", action: "despesa", category: "ASSINATURAS" });
+    expect(by("F3")).toMatchObject({ status: "novo", action: "transferencia", toAccountId: dela.id });
+    expect(by("F4")).toMatchObject({ status: "novo", action: "despesa", category: "OUTROS" });
+
+    const rows = pre.rows.map((r: { status: string; fitid: string; category: string; action: string }) => ({ ...r, action: r.status === "novo" ? r.action : "ignorar",
+      category: r.fitid === "F4" ? "PRESENTES" : r.category }))
+      .map(({ status: _s, hint: _h, ...x }: { status: string; hint: string }) => x);
+    const done = (await req("POST", `${P}/import/statement`, { accountId: minha.id, rows })).json;
+    expect(done).toMatchObject({ despesas: 2, transferencias: 1, ignorados: 1, erros: [] });
+    const bal = async (id: string) => (await req("GET", `${P}/accounts`)).json.find((a: { id: string }) => a.id === id).balanceCents;
+    expect(await bal(minha.id)).toBe(500000 - 8000 - 5990 - 30000 - 7777);
+    expect(await bal(dela.id)).toBe(30000);
+
+    // reimportar o mesmo arquivo não duplica
+    const again = (await req("POST", `${P}/import/statement/preview`, { accountId: minha.id, text: ofx })).json;
+    expect(again.rows.every((r: { status: string }) => r.status === "ja_importado")).toBe(true);
+    // aprende: mesma loja em outro mês vem com a categoria escolhida
+    const novo = `<OFX><STMTTRN><DTPOSTED>${ymd}<TRNAMT>-10.00<FITID>F9<MEMO>LOJA QUALQUER 456</OFX>`;
+    expect((await req("POST", `${P}/import/statement/preview`, { accountId: minha.id, text: novo })).json.rows[0]).toMatchObject({ category: "PRESENTES", hint: "como da última vez" });
+  });
+});

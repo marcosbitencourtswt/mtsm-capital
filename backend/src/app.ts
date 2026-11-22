@@ -6,6 +6,7 @@ import * as conduct from "./conduct.js";
 import * as admin from "./admin.js";
 import * as accounts from "./accounts.js";
 import * as push from "./push.js";
+import * as statement from "./statement.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import { actorStore, type Db } from "./db.js";
@@ -370,6 +371,17 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
   v1.post("/:entity/accounts", async c => c.json(await accounts.createAccount(db, c.get("entity"), c.get("user"), await body(c, accountCreate)), 201));
   v1.patch("/:entity/accounts/:id", async c => c.json(await accounts.updateAccount(db, c.get("entity"), param(c, "id"), await body(c, accountPatch))));
   v1.post("/:entity/accounts/:id/bill", async c => c.json(await accounts.addCardBill(db, c.get("entity"), c.get("user"), param(c, "id"), await body(c, billInput)), 201));
+  // Extrato OFX: prévia (classifica) e gravação (o que o usuário conferiu).
+  v1.post("/:entity/import/statement/preview", async c => {
+    const i = await body(c, z.object({ accountId: uuid, text: z.string().min(20).max(3_000_000) }).strict());
+    return c.json(await statement.previewStatement(db, c.get("entity"), i.accountId, i.text));
+  });
+  v1.post("/:entity/import/statement", async c => {
+    const row = z.object({ fitid: z.string().min(1).max(120), date: isoDate, amountCents: z.number().int().refine(v => v !== 0), memo: z.string().trim().min(1).max(120),
+      action: z.enum(["despesa", "receita", "transferencia", "ignorar"]), category: z.string().trim().max(40).optional(), personId: uuid.nullable().optional(), toAccountId: uuid.nullable().optional() }).strict();
+    const i = await body(c, z.object({ accountId: uuid, rows: z.array(row).min(1).max(1500) }).strict());
+    return c.json(await statement.commitStatement(db, c.get("entity"), c.get("user"), i.accountId, i.rows));
+  });
   v1.post("/:entity/import/accounts", async c => {
     requireAdmin(c);
     const i = await body(c, z.object({ version: z.literal(1), items: z.array(z.record(z.string(), z.unknown())).min(1).max(200) }).strict());
