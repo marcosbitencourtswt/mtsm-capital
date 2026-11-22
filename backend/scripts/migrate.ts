@@ -28,21 +28,28 @@ export async function migrate(url?: string): Promise<string[]> {
   await ensureDatabase(url ?? databaseUrl());
   const db = createPool(url);
   const applied: string[] = [];
+  // Uma conexão só, com trava exclusiva: dois deploys ao mesmo tempo não migram juntos.
   try {
-    await db.query("CREATE TABLE IF NOT EXISTS schema_migration (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())");
-    const done = new Set((await db.query<{ name: string }>("SELECT name FROM schema_migration")).rows.map(r => r.name));
+  const c = await db.connect();
+  try {
+    await c.query("SELECT pg_advisory_lock(727001)");
+    await c.query("CREATE TABLE IF NOT EXISTS schema_migration (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+    const done = new Set((await c.query<{ name: string }>("SELECT name FROM schema_migration")).rows.map(r => r.name));
     const dir = join(import.meta.dirname, "..", "db", "migrations");
     for (const f of readdirSync(dir).filter(f => f.endsWith(".sql")).sort()) {
       if (done.has(f)) continue;
-      const c = await db.connect();
       try {
         await c.query("BEGIN");
         await c.query(readFileSync(join(dir, f), "utf8"));
         await c.query("INSERT INTO schema_migration(name) VALUES ($1)", [f]);
         await c.query("COMMIT");
         applied.push(f);
-      } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); }
+      } catch (e) { await c.query("ROLLBACK"); throw e; }
     }
+  } finally {
+    await c.query("SELECT pg_advisory_unlock(727001)").catch(() => {});
+    c.release();
+  }
   } finally { await db.end(); }
   return applied;
 }
