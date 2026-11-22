@@ -1104,3 +1104,23 @@ describe("Indicadores", () => {
     expect((await req("GET", `${P}/report?month=janeiro`)).status).toBe(400);
   });
 });
+
+describe("Importar gastos (cupons lidos no chat)", () => {
+  it("lança na conta ou no cartão pelo nome, não duplica e aponta conta desconhecida", async () => {
+    const d = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+    const conta = (await req("POST", `${P}/accounts`, { type: "CHECKING", name: "Conta cupom", institution: "Banco Cupom", openingBalanceCents: 100000 })).json;
+    await req("POST", `${P}/accounts`, { type: "CARD", name: "Cartão cupom", institution: "Banco Cupom", creditLimitCents: 100000, closingDay: 28, dueDay: 5 });
+    const file = { version: 1, items: [
+      { type: "EXPENSE", description: "Mercado do cupom", amountCents: 4590, date: d, category: "ALIMENTACAO", owner: "Marcos", account: "Banco Cupom · Conta cupom" },
+      { type: "EXPENSE", description: "Farmácia do cupom", amountCents: 2300, date: d, category: "SAUDE", account: "banco cupom · cartão cupom" },
+      { type: "EXPENSE", description: "Sem conta", amountCents: 1000, date: d, category: "OUTROS", account: "Banco Inexistente · X" },
+    ] };
+    const pre = (await req("POST", `${P}/import/accounts?dryRun=1`, file)).json;
+    expect(pre.rows.map((r: { status: string }) => r.status)).toEqual(["novo", "novo", "erro"]);
+    expect((await req("POST", `${P}/import/accounts`, file)).json.created).toBe(2);
+    expect((await req("GET", `${P}/accounts`)).json.find((a: { id: string }) => a.id === conta.id).balanceCents).toBe(100000 - 4590);
+    const bill = (await req("GET", `${P}/titles?status=open`)).json.find((t: { counterparty: string }) => t.counterparty.includes("Banco Cupom · Cartão cupom"));
+    expect(bill.amountCents).toBe(2300); // foi para a fatura do cartão
+    expect((await req("POST", `${P}/import/accounts`, file)).json.rows.slice(0, 2).every((r: { status: string }) => r.status === "ja_existe")).toBe(true);
+  });
+});

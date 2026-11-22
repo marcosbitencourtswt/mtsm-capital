@@ -1324,7 +1324,7 @@ async function importStatement(accountId: string, file: File) {
 
 /* ===================== Importar cadastro ===================== */
 interface ImportRes { dryRun: boolean; created: number; rows: { index: number; status: "novo" | "ja_existe" | "erro"; type: string; label: string; owner: string; summary: string; error?: string }[]; }
-const IMPORT_TYPE: Record<string, string> = { RECURRENCE: "Automática", CHECKING: "Conta", SAVINGS: "Poupança", INVESTMENT: "Investimento", CARD: "Cartão", LOAN: "Dívida", CASH: "Dinheiro" };
+const IMPORT_TYPE: Record<string, string> = { EXPENSE: "Gasto", RECURRENCE: "Automática", CHECKING: "Conta", SAVINGS: "Poupança", INVESTMENT: "Investimento", CARD: "Cartão", LOAN: "Dívida", CASH: "Dinheiro" };
 async function importFile(file: File) {
   let data: unknown;
   try { data = JSON.parse(await file.text()); } catch { toast("Arquivo inválido: não é um JSON.", true); return; }

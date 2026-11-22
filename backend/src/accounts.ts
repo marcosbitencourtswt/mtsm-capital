@@ -6,7 +6,7 @@
  */
 import type { Db } from "./db.js";
 import { withTx } from "./db.js";
-import { AppError, createRecurrence, type Entity, type RecurrenceInput } from "./service.js";
+import { AppError, createRecurrence, quickExpense, type Entity, type RecurrenceInput } from "./service.js";
 import type { SessionUser } from "./auth.js";
 import { todaySP, dueDateFor, addMonths } from "./domain/finance.js";
 
@@ -315,8 +315,39 @@ export async function importAccounts(db: Db, e: Entity, u: SessionUser, items: I
   const out: ImportRow[] = [];
   const seen = new Set<string>();
   const recs = (await db.query("SELECT kind, lower(description) AS d FROM recurrence WHERE entity_code = $1 AND active", [e])).rows;
+  // Para gastos: contas/cartões pelo rótulo "Banco · Nome" (como aparece na tela).
+  const accRows = (await db.query(`SELECT a.id, a.type, lower(concat_ws(' · ', i.name, a.name)) AS label FROM account a LEFT JOIN institution i ON i.id = a.institution_id
+    WHERE a.entity_code = $1 AND a.active AND a.type IN ('CHECKING','SAVINGS','INVESTMENT','CASH','CARD')`, [e])).rows as { id: string; type: string; label: string }[];
   for (const [index, raw] of items.entries()) {
     const rr = raw as unknown as Record<string, unknown>;
+    if (rr.type === "EXPENSE") {
+      // Gasto já feito (ex.: cupons lidos no chat): mesmo caminho do "Já gastei", sem duplicar.
+      const base = { index, type: "EXPENSE", label: String(rr.description ?? "(sem descrição)").slice(0, 120), owner: String(rr.owner ?? "Casa / geral") };
+      try {
+        const amount = Number(rr.amountCents), date = String(rr.date ?? ""), desc = String(rr.description ?? "").trim();
+        if (!Number.isInteger(amount) || amount <= 0) throw new AppError(422, "AMOUNT", "Valor inválido (centavos, maior que zero).");
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new AppError(422, "DATE", "Data inválida (AAAA-MM-DD).");
+        if (!desc) throw new AppError(422, "DESC", "Falta a descrição.");
+        const p = rr.owner ? people.find(x => norm(x.name) === norm(String(rr.owner))) : null;
+        if (rr.owner && !p) throw new AppError(422, "OWNER", `Pessoa "${String(rr.owner)}" não cadastrada em Pessoas da casa.`);
+        const acc = rr.account ? accRows.find(a => a.label === String(rr.account).trim().toLowerCase()) : null;
+        if (rr.account && !acc) throw new AppError(422, "ACCOUNT", `Conta/cartão "${String(rr.account)}" não encontrado (use o nome como aparece em Bancos e dívidas: "Banco · Nome").`);
+        const category = String(rr.category ?? "OUTROS").toUpperCase();
+        const summary = `${fmt(amount)} em ${date.split("-").reverse().join("/")} · ${category}${acc ? ` · ${acc.type === "CARD" ? "cartão" : "conta"} ${String(rr.account)}` : ""}`;
+        const key = `EXP|${desc.toLowerCase()}|${amount}|${date}`;
+        const dup = seen.has(key) || (await db.query(`SELECT 1 FROM title t JOIN settlement s ON s.title_id = t.id WHERE t.entity_code = $1 AND t.kind = 'PAYABLE'
+          AND t.nature = 'EXPENSE' AND lower(t.counterparty) = $2 AND s.amount_cents = $3 AND s.paid_on = $4 AND t.deleted_at IS NULL AND s.deleted_at IS NULL LIMIT 1`,
+          [e, desc.toLowerCase(), amount, date])).rowCount;
+        seen.add(key);
+        if (dup) { out.push({ ...base, status: "ja_existe", summary }); continue; }
+        if (!dryRun) await quickExpense(db, e, { amountCents: amount, category, description: desc, date, personId: p?.id ?? null, createdBy: u.id,
+          ...(acc ? (acc.type === "CARD" ? { cardAccountId: acc.id } : { accountId: acc.id }) : {}) });
+        out.push({ ...base, status: "novo", summary });
+      } catch (err) {
+        out.push({ ...base, status: "erro", summary: "", error: err instanceof AppError ? err.message : (err as Error).message });
+      }
+      continue;
+    }
     if (rr.type === "RECURRENCE") {
       // Conta automática (aluguel, nota mensal, DAS, contador...): mesmo fluxo de prévia e sem duplicar.
       const base = { index, type: "RECURRENCE", label: String(rr.description ?? "(sem nome)"), owner: String(rr.owner ?? "Casa / dos dois") };
