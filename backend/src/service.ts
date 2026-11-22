@@ -9,7 +9,7 @@ import {
 export type Entity = "PERSONAL" | "BYTE4TECH";
 
 export class AppError extends Error {
-  constructor(public status: 400 | 401 | 403 | 404 | 409 | 422 | 503, public code: string, message: string, public details?: unknown) { super(message); }
+  constructor(public status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 503, public code: string, message: string, public details?: unknown) { super(message); }
 }
 
 type Q = Db | Tx;

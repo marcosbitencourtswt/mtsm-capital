@@ -370,3 +370,4 @@ label:has(> input[type=file]:focus-visible) .btnlike { outline: 2px solid var(--
   #more-tabs[hidden] { display: contents !important; }
   .more-toggle { display: none !important; }
 }
+.ocr-filled input, .ocr-filled select { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 45%, transparent); }

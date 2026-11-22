@@ -1104,3 +1104,31 @@ describe("Indicadores", () => {
     expect((await req("GET", `${P}/report?month=janeiro`)).status).toBe(400);
   });
 });
+
+describe("Foto do cupom (OCR)", () => {
+  it("desligado sem chave; com leitor devolve rascunho (não grava); recusa o que não é cupom; respeita o limite diário", async () => {
+    const ocr = await import("../src/ocr.js");
+    const img = "A".repeat(200);
+    delete process.env.ANTHROPIC_API_KEY; ocr.setScanner(null);
+    expect((await req("GET", `${P}/ocr/status`)).json.enabled).toBe(false);
+    expect((await req("POST", `${P}/receipt/scan`, { image: img, mediaType: "image/jpeg" })).json.error.code).toBe("OCR_DISABLED");
+
+    ocr.setScanner(async () => ({ is_receipt: true, total_brl: 45.9, date: "2026-11-21", merchant: "Supermercado Teste", category: "ALIMENTACAO", confidence: "alta", model: "simulado" }));
+    const before = (await req("GET", `${P}/titles`)).json.length;
+    const r = (await req("POST", `${P}/receipt/scan`, { image: img, mediaType: "image/jpeg" })).json;
+    expect(r).toMatchObject({ amountCents: 4590, date: "2026-11-21", description: "Supermercado Teste", category: "ALIMENTACAO", confidence: "alta" });
+    expect((await req("GET", `${P}/titles`)).json.length).toBe(before); // só rascunho: nada gravado
+
+    ocr.setScanner(async () => ({ is_receipt: false, total_brl: null, date: null, merchant: null, category: "OUTROS", confidence: "baixa", model: "simulado" }));
+    expect((await req("POST", `${P}/receipt/scan`, { image: img, mediaType: "image/jpeg" })).json.error.code).toBe("NOT_A_RECEIPT");
+    // data inválida vira null em vez de entrar lixo
+    ocr.setScanner(async () => ({ is_receipt: true, total_brl: 10, date: "21/11/2026", merchant: "X", category: "OUTROS", confidence: "media", model: "simulado" }));
+    expect((await req("POST", `${P}/receipt/scan`, { image: img, mediaType: "image/jpeg" })).json.date).toBeNull();
+
+    const me = (await req("GET", "/api/v1/auth/me")).json;
+    await db.query(`INSERT INTO ocr_usage (user_id) SELECT $1 FROM generate_series(1, ${ocr.DAILY_LIMIT})`, [me.id]);
+    expect((await req("POST", `${P}/receipt/scan`, { image: img, mediaType: "image/jpeg" })).status).toBe(429);
+    expect((await req("POST", `${P}/receipt/scan`, { image: "não é base64 ###".repeat(20), mediaType: "image/jpeg" })).status).toBe(400);
+    ocr.setScanner(null);
+  });
+});

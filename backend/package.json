@@ -23,6 +23,7 @@
     "test:e2e": "npm run build:web && tsx test/e2e/smoke.e2e.mts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
     "@hono/node-server": "2.1.11",
     "hono": "4.13.19",
     "pg": "8.23.1",

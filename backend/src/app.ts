@@ -11,6 +11,7 @@ import * as statement from "./statement.js";
 import * as budget from "./budget.js";
 import * as requests from "./requests.js";
 import { report } from "./report.js";
+import * as ocr from "./ocr.js";
 import type { SessionUser } from "./auth.js";
 import { z } from "zod";
 import { actorStore, type Db } from "./db.js";
@@ -423,6 +424,15 @@ export function createApp(db: Db, opts: { cronSecret?: string; secureCookies?: b
     for (const x of i.rows) if (x.action === "despesa" && x.category) byMonth.set(x.date.slice(0, 7), [...(byMonth.get(x.date.slice(0, 7)) ?? []), x.category]);
     for (const [m, cats] of byMonth) await budgetAlerts(c.get("entity"), cats, `${m}-28`);
     return c.json(r);
+  });
+  // Foto do cupom → rascunho de despesa (a pessoa confere e grava)
+  v1.get("/:entity/ocr/status", async c => {
+    const used = (await db.query<{ n: number }>("SELECT count(*)::int AS n FROM ocr_usage WHERE user_id = $1 AND at > now() - interval '1 day'", [c.get("user").id])).rows[0]!.n;
+    return c.json({ enabled: ocr.ocrEnabled(), dailyLimit: ocr.DAILY_LIMIT, usedToday: used });
+  });
+  v1.post("/:entity/receipt/scan", async c => {
+    const i = await body(c, z.object({ image: z.string().min(100).max(3_000_000).regex(/^[A-Za-z0-9+/=]+$/), mediaType: z.enum(["image/jpeg", "image/png", "image/webp"]) }).strict());
+    return c.json(await ocr.scanReceipt(db, c.get("user").id, i.image, i.mediaType));
   });
   // Dashboard de indicadores (mês em foco + 12 meses de tendência)
   v1.get("/:entity/report", async c => {
